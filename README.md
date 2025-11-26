@@ -45,44 +45,67 @@ faktura-bot-v5/
 
 ---
 
-## 🚀 Instalacja
+## 🚀 Instalacja i Uruchomienie
+
+Aby uruchomić projekt lokalnie, postępuj zgodnie z poniższymi instrukcjami.
 
 ### Wymagania wstępne
 
-- Python 3.10 lub nowszy
-- Tesseract OCR zainstalowany w systemie
-- Poppler (do konwersji PDF)
+1.  Zainstalowany [Python](https://www.python.org/).
+2.  Zainstalowany silnik [Tesseract-OCR](https://github.com/tesseract-ocr/tesseract) w systemie (i dodany do zmiennej środowiskowej PATH).
 
-### Kroki instalacji
+### Krok 1: Klonowanie repozytorium
 
-1. **Sklonuj repozytorium:**
-   git clone https://github.com/MarekFox/invoice-ocr.git
-   cd invoice-ocr
+Pobierz kod źródłowy i przełącz się na branch testowy:
 
+```bash
+git clone https://github.com/MarekFox/INVOICE_OCR.git
+cd INVOICE_OCR
+git checkout TESTING
+```
 
-2. Utwórz środowisko wirtualne:
+### Krok 2: Konfiguracja środowiska
+
+Zaleca się użycie wirtualnego środowiska:
+
+```bash
 python -m venv venv
-venv\Scripts\activate  # Windows
-# lub
 source venv/bin/activate  # Linux/Mac
+venv\Scripts\activate   # Windows
+```
 
-3. Zainstaluj zależności:
+### Krok 3: Instalacja zależności
+
+Zainstaluj wymagane biblioteki z pliku `requirements.txt`:
+
+```bash
 pip install -r requirements.txt
-
-4. Utwórz plik konfiguracyjny:
-cp secrets_config.example.py secrets_config.py
-# Edytuj secrets_config.py i ustaw ścieżki do Tesseract i Poppler
-
-
-5. Uruchom aplikację:
-python main.py
 
 Utwórz plik secrets_config.py z następującą zawartością:
 # Ścieżki do zewnętrznych narzędzi
+```bash
 TESSERACT_PATH = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 POPPLER_PATH = r"C:\Program Files\poppler\bin"
 
+## 💻 Użycie
 
+Aby uruchomić program i przetworzyć przykładową fakturę:
 
+```bash
+python main.py --input "sciezka/do/faktury.pdf"
+```
 
+Wyniki zostaną wyświetlone w konsoli lub zapisane w folderze `/output`.
 
+## 🧪 Branch: TESTING
+
+Ta gałąź (`TESTING`) służy do rozwoju i testowania eksperymentalnych funkcji. Kod tutaj zawarty może być niestabilny. Główne cele tej gałęzi to:
+
+1.  Testowanie nowych metod binaryzacji obrazu.
+2.  Poprawa wyrażeń regularnych (Regex) dla niestandardowych formatów faktur.
+3.  Unit testy dla modułów parsujących.
+
+## 🤝 Autor
+
+**MarekFox**
+Link do repozytorium: [https://github.com/MarekFox/INVOICE\_OCR](https://www.google.com/url?sa=E&source=gmail&q=https://github.com/MarekFox/INVOICE_OCR)
