@@ -1,0 +1,237 @@
+# Uniwersalny szablon dla polskich faktur
+issuer: "Szablon Ogólny Polski"
+description: "Domyślny szablon dla faktur w języku polskim"
+language: "Polski"
+priority: 1
+
+keywords:
+  - "FAKTURA"
+  - "FAKTURA VAT"
+  - "NIP"
+  - "SPRZEDAWCA"
+  - "NABYWCA"
+
+exclude_keywords: []
+
+fields:
+  invoice_id:
+    parser: regex
+    patterns:
+      - 'Faktura\s+(?:VAT\s+)?(?:nr\.?|Nr\.?)?\s*([A-Z0-9][A-Z0-9/\-\._]+)'
+      - 'FV[/-]?(\d+/\d+/\d{4})'
+      - 'Nr\s*faktury[:\s]+([A-Z0-9/\-\.]+)'
+      - '([0-9]{1,10}/[0-9]{1,2}/[0-9]{4})'
+    group: 1
+    required: true
+
+  invoice_type:
+    parser: keyword_detection
+    mapping:
+      "KOREKTA": "KOREKTA"
+      "CORRECTION": "KOREKTA"
+      "PROFORMA": "PROFORMA"
+      "ZALICZKOWA": "ZALICZKOWA"
+      "KOŃCOWA": "KOŃCOWA"
+    default: "VAT"
+
+  issue_date:
+    parser: date
+    keywords:
+      - "DATA WYSTAWIENIA"
+      - "Data wystawienia"
+      - "WYSTAWIENIA"
+    patterns:
+      - '\d{2}\.\d{2}\.\d{4}'
+      - '\d{2}-\d{2}-\d{4}'
+      - '\d{4}-\d{2}-\d{2}'
+    formats:
+      - '%d.%m.%Y'
+      - '%d-%m-%Y'
+      - '%Y-%m-%d'
+    search_range: 150
+    required: true
+
+  sale_date:
+    parser: date
+    keywords:
+      - "DATA SPRZEDAŻY"
+      - "Data sprzedaży"
+      - "DATA DOSTAWY"
+      - "Dostawy/wykonania usługi"
+    patterns:
+      - '\d{2}\.\d{2}\.\d{4}'
+    formats:
+      - '%d.%m.%Y'
+    fallback: "use_issue_date"
+
+  due_date:
+    parser: date
+    keywords:
+      - "TERMIN PŁATNOŚCI"
+      - "Termin płatności"
+      - "PŁATNE DO"
+      - "DO DNIA"
+    patterns:
+      - '\d{2}\.\d{2}\.\d{4}'
+    formats:
+      - '%d.%m.%Y'
+    fallback: "add_days:14"
+
+  supplier_name:
+    parser: context_extraction
+    keywords:
+      - "SPRZEDAWCA"
+      - "SPRZEDAJĄCY"
+      - "DOSTAWCA"
+      - "WYSTAWCA"
+    extraction_strategy: "next_line"
+    fallback: "NOT_FOUND"
+    required: true
+
+  supplier_tax_id:
+    parser: regex
+    patterns:
+      - 'NIP[:\.\s-]*(\d{3}[-\s]\d{3}[-\s]\d{2}[-\s]\d{2})'
+      - 'NIP[:\.\s-]*(\d{10})'
+      - '(?:PL[-\s]?)(\d{10})'
+    validator: nip
+    group: 1
+    context_keywords:
+      - "SPRZEDAWCA"
+      - "DOSTAWCA"
+    context_range: 300
+    required: true
+
+  supplier_address:
+    parser: address_extraction
+    context_keywords:
+      - "SPRZEDAWCA"
+    patterns:
+      - '(\d{2}-\d{3}\s+[A-ZĄŻŹĆŃŁÓĘŚ][a-zążźćńłóęś]+(?:\s+[A-ZĄŻŹĆŃŁÓĘŚ][a-zążźćńłóęś]+)*)'
+    context_range: 400
+
+  supplier_accounts:
+    parser: bank_accounts
+    patterns:
+      - '(?:PL\s?)?\d{2}\s?\d{4}\s?\d{4}\s?\d{4}\s?\d{4}\s?\d{4}\s?\d{4}'
+      - '(?<!\d)\d{26}(?!\d)'
+    validator: iban
+    multiple: true
+
+  buyer_name:
+    parser: context_extraction
+    keywords:
+      - "NABYWCA"
+      - "KUPUJĄCY"
+      - "ODBIORCA"
+    extraction_strategy: "next_line"
+    fallback: "NOT_FOUND"
+    required: true
+
+  buyer_tax_id:
+    parser: regex
+    patterns:
+      - 'NIP[:\.\s-]*(\d{3}[-\s]\d{3}[-\s]\d{2}[-\s]\d{2})'
+      - 'NIP[:\.\s-]*(\d{10})'
+    validator: nip
+    group: 1
+    context_keywords:
+      - "NABYWCA"
+      - "KUPUJĄCY"
+    context_range: 300
+    required: true
+
+  buyer_address:
+    parser: address_extraction
+    context_keywords:
+      - "NABYWCA"
+    patterns:
+      - '(\d{2}-\d{3}\s+[A-ZĄŻŹĆŃŁÓĘŚ][a-zążźćńłóęś]+)'
+    context_range: 400
+
+  total_gross:
+    parser: money
+    keywords:
+      - "DO ZAPŁATY"
+      - "RAZEM"
+      - "SUMA"
+      - "BRUTTO"
+      - "OGÓŁEM"
+    patterns:
+      - '(\d{1,3}(?:\s\d{3})*(?:,\d{2})?)\s*(?:zł|PLN|ZŁ)'
+      - '(\d{1,3}(?:\.\d{3})*(?:,\d{2})?)\s*(?:zł|PLN)'
+    currency: "PLN"
+    decimal_separator: ","
+    thousand_separator: " "
+    required: true
+
+  total_net:
+    parser: money
+    keywords:
+      - "NETTO"
+      - "WARTOŚĆ NETTO"
+      - "PODSTAWA"
+    patterns:
+      - '(\d{1,3}(?:\s\d{3})*(?:,\d{2})?)\s*(?:zł|PLN)?'
+    currency: "PLN"
+    fallback: "calculate_from_gross:23"
+
+  total_vat:
+    parser: money
+    keywords:
+      - "VAT"
+      - "PODATEK"
+      - "KWOTA VAT"
+    patterns:
+      - '(\d{1,3}(?:\s\d{3})*(?:,\d{2})?)\s*(?:zł|PLN)?'
+    currency: "PLN"
+    fallback: "calculate_difference"
+
+  currency:
+    parser: static
+    value: "PLN"
+
+lines:
+  enabled: true
+  start:
+    patterns:
+      - 'LP|L\.p\.|Lp\.'
+      - 'Nazwa.*Ilość.*Cena'
+  end:
+    patterns:
+      - 'Razem|RAZEM|Suma|SUMA|DO ZAPŁATY'
+  line_pattern: '^(\d+)\s+(.+?)\s+([\d,\.]+)\s+([\d,\.]+)\s+([\d,\.]+)$'
+  line_fields:
+    - name: position
+      group: 1
+      type: int
+    - name: description
+      group: 2
+      type: string
+    - name: quantity
+      group: 3
+      type: decimal
+    - name: price_unit
+      group: 4
+      type: decimal
+    - name: total
+      group: 5
+      type: decimal
+  skip_lines:
+    patterns:
+      - 'Strona \d+ z \d+'
+      - '-{3,}'
+
+options:
+  remove_whitespace: true
+  lowercase_keywords: false
+  date_tolerance_days: 365
+  amount_tolerance: 0.02
+  tax_id_assignment_strategy: "context_proximity"
+  validate_iban: true
+  debug_mode: false
+
+metadata:
+  author: "System"
+  version: "1.0"
+  created: "2025-11-29"

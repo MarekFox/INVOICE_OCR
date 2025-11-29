@@ -1,0 +1,222 @@
+# Uniwersalny szablon dla niemieckich faktur
+issuer: "Szablon Ogólny Niemiecki"
+description: "Domyślny szablon dla faktur w języku niemieckim"
+language: "Niemiecki"
+priority: 1
+
+keywords:
+  - "RECHNUNG"
+  - "UST-IDNR"
+  - "VERKÄUFER"
+  - "KÄUFER"
+  - "MWST"
+
+exclude_keywords: []
+
+fields:
+  invoice_id:
+    parser: regex
+    patterns:
+      - 'Rechnungs?[-\s]?(?:nr|nummer)[:\s]*([A-Z0-9][A-Z0-9/\-\.]+)'
+      - '(?:RNr|R\-Nr)[:\s]*([A-Z0-9][A-Z0-9/\-\.]+)'
+      - 'Invoice[\s]*(?:No|#)[:\s]*([A-Z0-9/\-\.]+)'
+    group: 1
+    required: true
+
+  invoice_type:
+    parser: keyword_detection
+    mapping:
+      "KORREKTUR": "KOREKTA"
+      "STORNORECHNUNG": "KOREKTA"
+      "PROFORMA": "PROFORMA"
+      "ANZAHLUNG": "ZALICZKOWA"
+    default: "VAT"
+
+  issue_date:
+    parser: date
+    keywords:
+      - "RECHNUNGSDATUM"
+      - "Rechnungsdatum"
+      - "DATUM"
+      - "Ausstellungsdatum"
+    patterns:
+      - '\d{2}\.\d{2}\.\d{4}'
+      - '\d{4}-\d{2}-\d{2}'
+    formats:
+      - '%d.%m.%Y'
+      - '%Y-%m-%d'
+    search_range: 150
+    required: true
+
+  sale_date:
+    parser: date
+    keywords:
+      - "LIEFERDATUM"
+      - "Leistungsdatum"
+      - "Lieferung"
+    patterns:
+      - '\d{2}\.\d{2}\.\d{4}'
+    formats:
+      - '%d.%m.%Y'
+    fallback: "use_issue_date"
+
+  due_date:
+    parser: date
+    keywords:
+      - "ZAHLBAR BIS"
+      - "Fälligkeitsdatum"
+      - "Zahlungsziel"
+    patterns:
+      - '\d{2}\.\d{2}\.\d{4}'
+    formats:
+      - '%d.%m.%Y'
+    fallback: "add_days:14"
+
+  supplier_name:
+    parser: context_extraction
+    keywords:
+      - "VERKÄUFER"
+      - "LIEFERANT"
+      - "ANBIETER"
+    extraction_strategy: "next_line"
+    fallback: "NOT_FOUND"
+    required: true
+
+  supplier_tax_id:
+    parser: regex
+    patterns:
+      - '(?:UST[-\s]?ID[-\s]?Nr|USt[-\s]?IdNr)[:\s]*(DE\s?\d{9})'
+      - 'Steuernummer[:\s]*(\d{2,3}/\d{3}/\d{5})'
+    group: 1
+    context_keywords:
+      - "VERKÄUFER"
+      - "LIEFERANT"
+    context_range: 300
+    required: true
+
+  supplier_address:
+    parser: address_extraction
+    context_keywords:
+      - "VERKÄUFER"
+    patterns:
+      - '(\d{5}\s+[A-ZÄÖÜ][a-zäöüß]+)'
+    context_range: 400
+
+  supplier_accounts:
+    parser: bank_accounts
+    patterns:
+      - '(?:DE\s?)?\d{2}\s?\d{4}\s?\d{4}\s?\d{4}\s?\d{4}\s?\d{2}'
+      - 'IBAN[:\s]*([A-Z]{2}\d{2}[A-Z0-9\s]+)'
+    validator: iban
+    multiple: true
+
+  buyer_name:
+    parser: context_extraction
+    keywords:
+      - "KÄUFER"
+      - "KUNDE"
+      - "EMPFÄNGER"
+    extraction_strategy: "next_line"
+    fallback: "NOT_FOUND"
+    required: true
+
+  buyer_tax_id:
+    parser: regex
+    patterns:
+      - '(?:UST[-\s]?ID[-\s]?Nr|USt[-\s]?IdNr)[:\s]*(DE\s?\d{9})'
+      - 'Steuernummer[:\s]*(\d{2,3}/\d{3}/\d{5})'
+    group: 1
+    context_keywords:
+      - "KÄUFER"
+      - "KUNDE"
+    context_range: 300
+
+  buyer_address:
+    parser: address_extraction
+    context_keywords:
+      - "KÄUFER"
+    patterns:
+      - '(\d{5}\s+[A-ZÄÖÜ][a-zäöüß]+)'
+    context_range: 400
+
+  total_gross:
+    parser: money
+    keywords:
+      - "GESAMTBETRAG"
+      - "ENDBETRAG"
+      - "SUMME"
+      - "BRUTTO"
+    patterns:
+      - '(\d{1,3}(?:\.\d{3})*(?:,\d{2})?)\s*(?:€|EUR)'
+    currency: "EUR"
+    decimal_separator: ","
+    thousand_separator: "."
+    required: true
+
+  total_net:
+    parser: money
+    keywords:
+      - "NETTO"
+      - "NETTOBETRAG"
+    patterns:
+      - '(\d{1,3}(?:\.\d{3})*(?:,\d{2})?)\s*(?:€|EUR)?'
+    currency: "EUR"
+    fallback: "calculate_from_gross:19"
+
+  total_vat:
+    parser: money
+    keywords:
+      - "MWST"
+      - "MEHRWERTSTEUER"
+      - "UST"
+    patterns:
+      - '(\d{1,3}(?:\.\d{3})*(?:,\d{2})?)\s*(?:€|EUR)?'
+    currency: "EUR"
+    fallback: "calculate_difference"
+
+  currency:
+    parser: static
+    value: "EUR"
+
+lines:
+  enabled: true
+  start:
+    patterns:
+      - 'Pos|POS|Nr\.'
+      - 'Bezeichnung.*Menge.*Preis'
+  end:
+    patterns:
+      - 'Gesamt|GESAMT|Summe|SUMME'
+  line_pattern: '^(\d+)\s+(.+?)\s+([\d,\.]+)\s+([\d,\.]+)\s+([\d,\.]+)$'
+  line_fields:
+    - name: position
+      group: 1
+      type: int
+    - name: description
+      group: 2
+      type: string
+    - name: quantity
+      group: 3
+      type: decimal
+    - name: price_unit
+      group: 4
+      type: decimal
+    - name: total
+      group: 5
+      type: decimal
+  skip_lines:
+    patterns:
+      - 'Seite \d+ von \d+'
+
+options:
+  remove_whitespace: true
+  date_tolerance_days: 365
+  amount_tolerance: 0.02
+  tax_id_assignment_strategy: "context_proximity"
+  validate_iban: true
+  debug_mode: false
+
+metadata:
+  author: "System"
+  version: "1.0"
+  created: "2025-11-29"
