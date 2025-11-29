@@ -2,7 +2,7 @@
 FAKTURA BOT v5.0 - GUI Components
 ====
 Zaawansowane komponenty interfejsu użytkownika
-UPDATED: Dodano document_type, ulepszone kopiowanie CTRL+C
+UPDATED: Dodano document_type, CTRL+C przez installEventFilter
 """
 
 from typing import List, Dict, Optional, Any
@@ -13,12 +13,13 @@ from PyQt6.QtWidgets import (
     QMenu, QFileDialog, QMessageBox, QDialog, QFormLayout,
     QSpinBox, QDoubleSpinBox, QDateEdit, QRadioButton, QButtonGroup,
     QListWidget, QListWidgetItem, QTreeWidget, QTreeWidgetItem,
-    QGraphicsView, QGraphicsScene, QToolBar, QStatusBar, QApplication
+    QGraphicsView, QGraphicsScene, QToolBar, QStatusBar, QApplication,
+    QAbstractItemView
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QDate, QPropertyAnimation, QEasingCurve
+from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QDate, QPropertyAnimation, QEasingCurve, QObject, QEvent
 from PyQt6.QtGui import (
     QFont, QColor, QPalette, QBrush, QPixmap, QPainter,
-    QAction, QIcon, QKeySequence, QPen, QShortcut
+    QAction, QIcon, QKeySequence, QPen, QKeyEvent
 )
 from dataclasses import dataclass
 import json
@@ -32,13 +33,61 @@ from parsers import ParsedInvoice
 # ==============================================================================
 
 def create_selectable_label(text: str = "") -> QLabel:
-    """Tworzy QLabel z możliwością zaznaczania i kopiowania tekstu (CTRL+C)"""
+    """Tworzy QLabel z możliwością zaznaczania i kopiowania tekstu"""
     label = QLabel(text)
     label.setTextInteractionFlags(
         Qt.TextInteractionFlag.TextSelectableByMouse | 
         Qt.TextInteractionFlag.TextSelectableByKeyboard
     )
     return label
+
+
+# ==============================================================================
+# KLASA: TableCopyEventFilter - Event filter do obsługi CTRL+C
+# ==============================================================================
+
+class TableCopyEventFilter(QObject):
+    """Event filter obsługujący CTRL+C dla QTableWidget"""
+
+    def __init__(self, table: QTableWidget):
+        super().__init__(table)
+        self.table = table
+
+    def eventFilter(self, obj: QObject, event: QEvent) -> bool:
+        if event.type() == QEvent.Type.KeyPress:
+            key_event = event
+            # Sprawdź CTRL+C
+            if (key_event.key() == Qt.Key.Key_C and 
+                key_event.modifiers() == Qt.KeyboardModifier.ControlModifier):
+                self.copy_selection()
+                return True  # Event obsłużony
+        return False  # Przekaż event dalej
+
+    def copy_selection(self):
+        """Kopiuje zaznaczone komórki do schowka"""
+        selection = self.table.selectedItems()
+        if not selection:
+            return
+
+        # Zbierz unikalne wiersze i kolumny
+        rows = sorted(set(item.row() for item in selection))
+        cols = sorted(set(item.column() for item in selection))
+
+        # Zbuduj tekst do skopiowania
+        lines = []
+        for row in rows:
+            row_data = []
+            for col in cols:
+                item = self.table.item(row, col)
+                row_data.append(item.text() if item else "")
+            lines.append("\t".join(row_data))
+
+        text = "\n".join(lines)
+
+        # Skopiuj do schowka
+        clipboard = QApplication.clipboard()
+        if clipboard:
+            clipboard.setText(text)
 
 
 # ==============================================================================
@@ -55,6 +104,14 @@ class InvoiceTableWidget(QTableWidget):
         super().__init__()
         self.invoices = []
         self.setup_ui()
+        self._setup_copy_handler()
+
+    def _setup_copy_handler(self):
+        """Instaluje event filter do obsługi CTRL+C"""
+        self.copy_filter = TableCopyEventFilter(self)
+        self.installEventFilter(self.copy_filter)
+        # Upewnij się, że tabela może otrzymać focus
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
     def setup_ui(self):
         """Konfiguruje wygląd tabeli"""
@@ -70,6 +127,7 @@ class InvoiceTableWidget(QTableWidget):
         # Wygląd
         self.setAlternatingRowColors(True)
         self.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.setSortingEnabled(True)
 
         # Szerokości kolumn
@@ -87,34 +145,10 @@ class InvoiceTableWidget(QTableWidget):
         self.itemSelectionChanged.connect(self.on_selection_changed)
         self.itemDoubleClicked.connect(self.on_item_double_clicked)
 
-        # NOWE: Skrót CTRL+C do kopiowania zaznaczonych komórek
-        self.copy_shortcut = QShortcut(QKeySequence.StandardKey.Copy, self)
-        self.copy_shortcut.activated.connect(self.copy_selection_to_clipboard)
-
     def copy_selection_to_clipboard(self):
-        """Kopiuje zaznaczone komórki do schowka"""
-        selection = self.selectedItems()
-        if not selection:
-            return
-
-        # Zbierz unikalne wiersze i kolumny
-        rows = sorted(set(item.row() for item in selection))
-        cols = sorted(set(item.column() for item in selection))
-
-        # Zbuduj tekst do skopiowania
-        lines = []
-        for row in rows:
-            row_data = []
-            for col in cols:
-                item = self.item(row, col)
-                row_data.append(item.text() if item else "")
-            lines.append("\t".join(row_data))
-
-        text = "\n".join(lines)
-
-        # Skopiuj do schowka
-        clipboard = QApplication.clipboard()
-        clipboard.setText(text)
+        """Publiczna metoda do kopiowania - używana przez menu kontekstowe"""
+        if hasattr(self, 'copy_filter'):
+            self.copy_filter.copy_selection()
 
     def add_invoice(self, invoice: ParsedInvoice):
         """Dodaje fakturę do tabeli"""
@@ -206,7 +240,7 @@ class InvoiceTableWidget(QTableWidget):
         """Wyświetla menu kontekstowe"""
         menu = QMenu(self)
 
-        # NOWE: Akcja kopiowania
+        # Akcja kopiowania
         copy_action = QAction("📋 Kopiuj (Ctrl+C)", self)
         copy_action.triggered.connect(self.copy_selection_to_clipboard)
         menu.addAction(copy_action)
@@ -299,7 +333,7 @@ class InvoiceTableWidget(QTableWidget):
         warnings = sum(1 for inv in self.invoices if inv.parsing_warnings and not inv.parsing_errors)
         duplicates = sum(1 for inv in self.invoices if inv.is_duplicate)
 
-        # NOWE: Statystyki typów dokumentów
+        # Statystyki typów dokumentów
         originals = sum(1 for inv in self.invoices if inv.document_type == 'oryginał')
         copies = sum(1 for inv in self.invoices if inv.document_type == 'kopia')
 
@@ -368,11 +402,11 @@ class InvoiceDetailsWidget(QWidget):
         self.invoice_id_label = create_selectable_label()
         self.invoice_type_label = create_selectable_label()
 
-        # NOWE: Typ dokumentu (oryginał/kopia)
+        # Typ dokumentu (oryginał/kopia)
         self.document_type_label = create_selectable_label()
         self.document_type_label.setStyleSheet("font-weight: bold; padding: 2px 6px;")
 
-        # NOWE: Seria faktury (dla rumuńskich)
+        # Seria faktury (dla rumuńskich)
         self.invoice_series_label = create_selectable_label()
 
         self.issue_date_label = create_selectable_label()
@@ -386,11 +420,11 @@ class InvoiceDetailsWidget(QWidget):
         self.payment_status_label = create_selectable_label()
 
         layout.addRow("Nr faktury:", self.invoice_id_label)
-        layout.addRow("Seria:", self.invoice_series_label)  # NOWE
+        layout.addRow("Seria:", self.invoice_series_label)
         layout.addRow("Typ:", self.invoice_type_label)
-        layout.addRow("Dokument:", self.document_type_label)  # NOWE
+        layout.addRow("Dokument:", self.document_type_label)
         layout.addRow("Data wystawienia:", self.issue_date_label)
-        layout.addRow("Data sprzedaży:", self.sale_date_label)  # NOWE
+        layout.addRow("Data sprzedaży:", self.sale_date_label)
         layout.addRow("Termin płatności:", self.due_date_label)
         layout.addRow("Wartość netto:", self.total_net_label)
         layout.addRow("VAT:", self.total_vat_label)
@@ -407,40 +441,21 @@ class InvoiceDetailsWidget(QWidget):
         widget = QWidget()
         layout = QVBoxLayout()
 
-        # Tabela pozycji
+        # Tabela pozycji z obsługą CTRL+C
         self.items_table = QTableWidget()
         self.items_table.setColumnCount(5)
         self.items_table.setHorizontalHeaderLabels(
             ["LP", "Opis", "Ilość", "Cena jedn.", "Wartość"]
         )
 
-        # NOWE: Skrót CTRL+C dla tabeli pozycji
-        self.items_copy_shortcut = QShortcut(QKeySequence.StandardKey.Copy, self.items_table)
-        self.items_copy_shortcut.activated.connect(lambda: self._copy_table_selection(self.items_table))
+        # Dodaj event filter dla CTRL+C
+        self.items_copy_filter = TableCopyEventFilter(self.items_table)
+        self.items_table.installEventFilter(self.items_copy_filter)
+        self.items_table.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
         layout.addWidget(self.items_table)
         widget.setLayout(layout)
         return widget
-
-    def _copy_table_selection(self, table: QTableWidget):
-        """Kopiuje zaznaczenie z tabeli do schowka"""
-        selection = table.selectedItems()
-        if not selection:
-            return
-
-        rows = sorted(set(item.row() for item in selection))
-        cols = sorted(set(item.column() for item in selection))
-
-        lines = []
-        for row in rows:
-            row_data = []
-            for col in cols:
-                item = table.item(row, col)
-                row_data.append(item.text() if item else "")
-            lines.append("\t".join(row_data))
-
-        text = "\n".join(lines)
-        QApplication.clipboard().setText(text)
 
     def _create_parties_tab(self) -> QWidget:
         """Tworzy zakładkę stron transakcji"""
@@ -526,7 +541,7 @@ class InvoiceDetailsWidget(QWidget):
         widget = QWidget()
         layout = QVBoxLayout()
 
-        # NOWE: Przycisk kopiowania całego tekstu OCR
+        # Przycisk kopiowania całego tekstu OCR
         copy_btn = QPushButton("📋 Kopiuj cały tekst OCR")
         copy_btn.clicked.connect(self._copy_raw_text)
         layout.addWidget(copy_btn)
@@ -543,9 +558,9 @@ class InvoiceDetailsWidget(QWidget):
         """Kopiuje cały tekst OCR do schowka"""
         text = self.raw_text.toPlainText()
         if text:
-            QApplication.clipboard().setText(text)
-            # Opcjonalnie: pokaż komunikat
-            # QMessageBox.information(self, "Skopiowano", "Tekst OCR skopiowany do schowka")
+            clipboard = QApplication.clipboard()
+            if clipboard:
+                clipboard.setText(text)
 
     def display_invoice(self, invoice: ParsedInvoice):
         """Wyświetla szczegóły faktury"""
@@ -556,7 +571,7 @@ class InvoiceDetailsWidget(QWidget):
         # ==== ZAKŁADKA: PRZEGLĄD ====
         self.invoice_id_label.setText(invoice.invoice_id)
 
-        # NOWE: Seria faktury
+        # Seria faktury
         if invoice.invoice_series:
             self.invoice_series_label.setText(invoice.invoice_series)
             self.invoice_series_label.setVisible(True)
@@ -565,7 +580,7 @@ class InvoiceDetailsWidget(QWidget):
 
         self.invoice_type_label.setText(invoice.invoice_type)
 
-        # NOWE: Typ dokumentu z kolorowym tłem
+        # Typ dokumentu z kolorowym tłem
         doc_type = invoice.document_type.upper()
         self.document_type_label.setText(doc_type)
 
