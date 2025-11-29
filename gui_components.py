@@ -2,7 +2,7 @@
 FAKTURA BOT v5.0 - GUI Components
 ====
 Zaawansowane komponenty interfejsu użytkownika
-UPDATED: Dodano document_type, CTRL+C przez installEventFilter
+UPDATED: CTRL+C przez QAction z QKeySequence
 """
 
 from typing import List, Dict, Optional, Any
@@ -16,10 +16,10 @@ from PyQt6.QtWidgets import (
     QGraphicsView, QGraphicsScene, QToolBar, QStatusBar, QApplication,
     QAbstractItemView
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QDate, QPropertyAnimation, QEasingCurve, QObject, QEvent
+from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QDate, QPropertyAnimation, QEasingCurve
 from PyQt6.QtGui import (
     QFont, QColor, QPalette, QBrush, QPixmap, QPainter,
-    QAction, QIcon, QKeySequence, QPen, QKeyEvent
+    QAction, QIcon, QKeySequence, QPen
 )
 from dataclasses import dataclass
 import json
@@ -43,54 +43,6 @@ def create_selectable_label(text: str = "") -> QLabel:
 
 
 # ==============================================================================
-# KLASA: TableCopyEventFilter - Event filter do obsługi CTRL+C
-# ==============================================================================
-
-class TableCopyEventFilter(QObject):
-    """Event filter obsługujący CTRL+C dla QTableWidget"""
-
-    def __init__(self, table: QTableWidget):
-        super().__init__(table)
-        self.table = table
-
-    def eventFilter(self, obj: QObject, event: QEvent) -> bool:
-        if event.type() == QEvent.Type.KeyPress:
-            key_event = event
-            # Sprawdź CTRL+C
-            if (key_event.key() == Qt.Key.Key_C and 
-                key_event.modifiers() == Qt.KeyboardModifier.ControlModifier):
-                self.copy_selection()
-                return True  # Event obsłużony
-        return False  # Przekaż event dalej
-
-    def copy_selection(self):
-        """Kopiuje zaznaczone komórki do schowka"""
-        selection = self.table.selectedItems()
-        if not selection:
-            return
-
-        # Zbierz unikalne wiersze i kolumny
-        rows = sorted(set(item.row() for item in selection))
-        cols = sorted(set(item.column() for item in selection))
-
-        # Zbuduj tekst do skopiowania
-        lines = []
-        for row in rows:
-            row_data = []
-            for col in cols:
-                item = self.table.item(row, col)
-                row_data.append(item.text() if item else "")
-            lines.append("\t".join(row_data))
-
-        text = "\n".join(lines)
-
-        # Skopiuj do schowka
-        clipboard = QApplication.clipboard()
-        if clipboard:
-            clipboard.setText(text)
-
-
-# ==============================================================================
 # KLASA: InvoiceTableWidget
 # ==============================================================================
 
@@ -104,14 +56,50 @@ class InvoiceTableWidget(QTableWidget):
         super().__init__()
         self.invoices = []
         self.setup_ui()
-        self._setup_copy_handler()
+        self._setup_copy_shortcut()
 
-    def _setup_copy_handler(self):
-        """Instaluje event filter do obsługi CTRL+C"""
-        self.copy_filter = TableCopyEventFilter(self)
-        self.installEventFilter(self.copy_filter)
-        # Upewnij się, że tabela może otrzymać focus
-        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+    def _setup_copy_shortcut(self):
+        """Konfiguruje skrót CTRL+C przez QAction"""
+        # Metoda 1: QAction z shortcut
+        self.copy_action = QAction("Kopiuj", self)
+        self.copy_action.setShortcut(QKeySequence.StandardKey.Copy)
+        self.copy_action.setShortcutContext(Qt.ShortcutContext.WidgetShortcut)
+        self.copy_action.triggered.connect(self.copy_selection_to_clipboard)
+        self.addAction(self.copy_action)
+
+    def keyPressEvent(self, event):
+        """Obsługa klawiszy - backup dla CTRL+C"""
+        if event.matches(QKeySequence.StandardKey.Copy):
+            self.copy_selection_to_clipboard()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def copy_selection_to_clipboard(self):
+        """Kopiuje zaznaczone komórki do schowka"""
+        selection = self.selectedItems()
+        if not selection:
+            return
+
+        # Zbierz unikalne wiersze i kolumny
+        rows = sorted(set(item.row() for item in selection))
+        cols = sorted(set(item.column() for item in selection))
+
+        # Zbuduj tekst do skopiowania
+        lines = []
+        for row in rows:
+            row_data = []
+            for col in cols:
+                item = self.item(row, col)
+                row_data.append(item.text() if item else "")
+            lines.append("\t".join(row_data))
+
+        text = "\n".join(lines)
+
+        # Skopiuj do schowka
+        clipboard = QApplication.clipboard()
+        if clipboard:
+            clipboard.setText(text)
 
     def setup_ui(self):
         """Konfiguruje wygląd tabeli"""
@@ -145,11 +133,6 @@ class InvoiceTableWidget(QTableWidget):
         self.itemSelectionChanged.connect(self.on_selection_changed)
         self.itemDoubleClicked.connect(self.on_item_double_clicked)
 
-    def copy_selection_to_clipboard(self):
-        """Publiczna metoda do kopiowania - używana przez menu kontekstowe"""
-        if hasattr(self, 'copy_filter'):
-            self.copy_filter.copy_selection()
-
     def add_invoice(self, invoice: ParsedInvoice):
         """Dodaje fakturę do tabeli"""
         self.invoices.append(invoice)
@@ -179,7 +162,7 @@ class InvoiceTableWidget(QTableWidget):
         # Typ faktury
         self.setItem(row, 2, QTableWidgetItem(invoice.invoice_type))
 
-        # NOWE: Typ dokumentu (oryginał/kopia) z kolorowym tłem
+        # Typ dokumentu (oryginał/kopia) z kolorowym tłem
         doc_type_item = QTableWidgetItem(invoice.document_type.upper())
         doc_type_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
 
@@ -352,6 +335,56 @@ class InvoiceTableWidget(QTableWidget):
 
 
 # ==============================================================================
+# KLASA: CopyableTableWidget - dla innych tabel
+# ==============================================================================
+
+class CopyableTableWidget(QTableWidget):
+    """Tabela z obsługą CTRL+C"""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._setup_copy()
+
+    def _setup_copy(self):
+        """Konfiguruje kopiowanie"""
+        copy_action = QAction("Kopiuj", self)
+        copy_action.setShortcut(QKeySequence.StandardKey.Copy)
+        copy_action.setShortcutContext(Qt.ShortcutContext.WidgetShortcut)
+        copy_action.triggered.connect(self.copy_selection)
+        self.addAction(copy_action)
+
+    def keyPressEvent(self, event):
+        """Obsługa CTRL+C"""
+        if event.matches(QKeySequence.StandardKey.Copy):
+            self.copy_selection()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def copy_selection(self):
+        """Kopiuje zaznaczenie do schowka"""
+        selection = self.selectedItems()
+        if not selection:
+            return
+
+        rows = sorted(set(item.row() for item in selection))
+        cols = sorted(set(item.column() for item in selection))
+
+        lines = []
+        for row in rows:
+            row_data = []
+            for col in cols:
+                item = self.item(row, col)
+                row_data.append(item.text() if item else "")
+            lines.append("\t".join(row_data))
+
+        text = "\n".join(lines)
+        clipboard = QApplication.clipboard()
+        if clipboard:
+            clipboard.setText(text)
+
+
+# ==============================================================================
 # KLASA: InvoiceDetailsWidget
 # ==============================================================================
 
@@ -442,16 +475,11 @@ class InvoiceDetailsWidget(QWidget):
         layout = QVBoxLayout()
 
         # Tabela pozycji z obsługą CTRL+C
-        self.items_table = QTableWidget()
+        self.items_table = CopyableTableWidget()
         self.items_table.setColumnCount(5)
         self.items_table.setHorizontalHeaderLabels(
             ["LP", "Opis", "Ilość", "Cena jedn.", "Wartość"]
         )
-
-        # Dodaj event filter dla CTRL+C
-        self.items_copy_filter = TableCopyEventFilter(self.items_table)
-        self.items_table.installEventFilter(self.items_copy_filter)
-        self.items_table.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
         layout.addWidget(self.items_table)
         widget.setLayout(layout)
