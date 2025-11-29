@@ -1,0 +1,355 @@
+# Uniwersalny szablon dla austriackich faktur
+issuer: "Szablon Ogólny Austriacki"
+description: "Domyślny szablon dla faktur w języku niemieckim (Austria)"
+language: "Austriacki"
+language_code: "at"
+priority: 1
+
+# ====
+# SŁOWA KLUCZOWE DO IDENTYFIKACJI DOKUMENTU
+# ====
+keywords:
+  - "RECHNUNG"
+  - "UID-NR"
+  - "ATU"
+  - "VERKÄUFER"
+  - "KÄUFER"
+  - "MWST"
+  - "UST"
+
+exclude_keywords: []
+
+# ====
+# KONFIGURACJA WALUTY
+# ====
+currency:
+  default: "EUR"
+  patterns:
+    EUR:
+      codes: ["EUR"]
+      symbols: ["€", "euro", "EURO", "Euro"]
+      weight: 1.0
+    CHF:
+      codes: ["CHF"]
+      symbols: ["Fr.", "Franken", "frank"]
+      weight: 0.6
+  ignore_patterns:
+    - '[A-Z]{2}\d{2}[\s]?[A-Z0-9]{4}[\s]?[\d]{4}[\s]?[\d]{4}[\s]?[\d]{4}[\s]?[\d]{4}'
+    - '(?:AT|DE|CH)\s?\d{8,12}'
+    - '(?:UID|USt-IdNr|Steuernummer)[:\s]*[A-Z0-9/\s]+'
+
+# ====
+# KONFIGURACJA NUMERU FAKTURY
+# ====
+invoice_number:
+  prefixes:
+    - 'Rechnungs?[-\s]?(?:nr|nummer)[:\s]*'
+    - '(?:RNr|R\-Nr|RE)[:\s]*'
+    - 'Rechnungsnummer[:\s]*'
+    - 'Invoice[\s]*(?:No|#)?[:\s]*'
+    - 'Beleg[-\s]?(?:Nr|nummer)[:\s]*'
+    - 'Faktura[:\s]*'
+  patterns:
+    - '([A-Z]{1,4}[/\\-]\d{1,6}(?:[/\\-]\d{1,4}){0,2})'
+    - '(\d{1,6}[/\\-]\d{2,4}(?:[/\\-]\d{1,4})?)'
+    - '([A-Z]{1,4}[-_]\d{1,6}[-_]\d{2,4})'
+    - '(\d{4}[/\\-][A-Z]{1,4}[/\\-]\d{1,6})'
+    - '(\d{8,15})'
+    - '([A-Z]{2,5}\d{5,10})'
+  line_keywords:
+    - "RECHNUNG"
+    - "INVOICE"
+    - "BELEG"
+    - "FAKTURA"
+
+# ====
+# KONFIGURACJA TYPU FAKTURY
+# ====
+invoice_type:
+  default: "VAT"
+  mapping:
+    KOREKTA:
+      keywords: ["KORREKTUR", "STORNORECHNUNG", "GUTSCHRIFT", "CORRECTION", "STORNO"]
+    PROFORMA:
+      keywords: ["PROFORMA", "PRO FORMA", "PRO-FORMA"]
+    ZALICZKOWA:
+      keywords: ["ANZAHLUNG", "ABSCHLAG", "VORAUSZAHLUNG", "TEILRECHNUNG"]
+    KOŃCOWA:
+      keywords: ["SCHLUSSRECHNUNG", "ENDRECHNUNG", "FINAL"]
+
+# ====
+# KONFIGURACJA TYPU DOKUMENTU (ORYGINAŁ/KOPIA)
+# ====
+document_type:
+  default: "nieznany"
+  patterns:
+    oryginał:
+      - '\bORIGINAL\b'
+      - '\bURSCHRIFT\b'
+    kopia:
+      - '\bKOPIE\b'
+      - '\bCOPY\b'
+      - '\bABSCHRIFT\b'
+    duplikat:
+      - '\bDUPLIKAT\b'
+      - '\bDUPLICATE\b'
+      - '\bZWEITSCHRIFT\b'
+
+# ====
+# KONFIGURACJA DAT
+# ====
+dates:
+  formats:
+    - pattern: '\d{2}\.\d{2}\.\d{4}'
+      format: '%d.%m.%Y'
+    - pattern: '\d{4}-\d{2}-\d{2}'
+      format: '%Y-%m-%d'
+    - pattern: '\d{2}/\d{2}/\d{4}'
+      format: '%d/%m/%Y'
+    - pattern: '\d{1,2}\.\s?[A-Za-zäöü]+\s?\d{4}'
+      format: '%d. %B %Y'
+  
+  issue_date:
+    keywords:
+      - "RECHNUNGSDATUM"
+      - "Rechnungsdatum"
+      - "DATUM"
+      - "Datum"
+      - "AUSSTELLUNGSDATUM"
+      - "Ausstellungsdatum"
+      - "Ausgestellt am"
+      - "Belegdatum"
+    search_range: 150
+    required: true
+  
+  sale_date:
+    keywords:
+      - "LIEFERDATUM"
+      - "Lieferdatum"
+      - "LEISTUNGSDATUM"
+      - "Leistungsdatum"
+      - "LIEFERUNG"
+      - "Lieferung"
+      - "Leistungszeitraum"
+      - "Lieferzeitraum"
+    search_range: 150
+    fallback: "use_issue_date"
+  
+  due_date:
+    keywords:
+      - "ZAHLBAR BIS"
+      - "Zahlbar bis"
+      - "FÄLLIGKEITSDATUM"
+      - "Fälligkeitsdatum"
+      - "ZAHLUNGSZIEL"
+      - "Zahlungsziel"
+      - "Fällig am"
+      - "Zahlung bis"
+      - "Zahlungsfrist"
+    search_range: 150
+    fallback_days: 14
+
+# ====
+# KONFIGURACJA NIP/IDENTYFIKATORÓW PODATKOWYCH (AUSTRIA)
+# ====
+tax_id:
+  name: "UID-Nr"
+  patterns:
+    - '(?:UID[-\s]?Nr\.?|UID[-\s]?Nummer)[:\s]*(ATU\s?\d{8})'
+    - '(?:UID|VAT)[-\s]?(?:Nr\.?)?[:\s]*(ATU\s?\d{8})'
+    - '\b(ATU\s?\d{8})\b'
+    - 'Steuernummer[:\s]*(\d{2,3}[-/]\d{3,4})'
+    - 'St[-\.]?Nr[:\s]*(\d{2,3}[-/]\d{3,4})'
+    - 'Finanzamt[:\s]*(\d+[-/]\d+)'
+  validation:
+    type: "vat_at"
+    length: 11
+  prefix: "ATU"
+
+# ====
+# KONFIGURACJA STRON (SPRZEDAWCA/NABYWCA)
+# ====
+parties:
+  seller:
+    keywords:
+      - "VERKÄUFER"
+      - "Verkäufer"
+      - "LIEFERANT"
+      - "Lieferant"
+      - "ANBIETER"
+      - "Anbieter"
+      - "RECHNUNGSSTELLER"
+      - "Absender"
+      - "Leistungserbringer"
+    context_range: 300
+  
+  buyer:
+    keywords:
+      - "KÄUFER"
+      - "Käufer"
+      - "KUNDE"
+      - "Kunde"
+      - "EMPFÄNGER"
+      - "Empfänger"
+      - "RECHNUNGSEMPFÄNGER"
+      - "Besteller"
+      - "Auftraggeber"
+    context_range: 300
+
+# ====
+# KONFIGURACJA ADRESÓW (AUSTRIA)
+# ====
+address:
+  patterns:
+    - '(\d{4}\s+[A-ZÄÖÜ][a-zäöüß]+(?:\s+[A-ZÄÖÜ][a-zäöüß]+)*)'
+    - '([A-ZÄÖÜ][a-zäöüß]+(?:straße|str\.|gasse|weg|platz|allee)\s+\d+[a-z]?(?:/\d+)?)'
+    - '(A-\d{4}\s+[A-ZÄÖÜ][a-zäöüß]+)'
+  postal_code_pattern: '\d{4}'
+  context_range: 400
+
+# ====
+# KONFIGURACJA KONT BANKOWYCH (AUSTRIA - IBAN AT)
+# ====
+bank_accounts:
+  patterns:
+    - '(?:AT\s?)?\d{2}\s?\d{4}\s?\d{4}\s?\d{4}\s?\d{4}'
+    - 'IBAN[:\s]*([A-Z]{2}\d{2}[A-Z0-9\s]+)'
+    - 'AT\d{2}\s?\d{4}\s?\d{4}\s?\d{4}\s?\d{4}'
+    - 'BIC[:\s]*([A-Z]{8,11})'
+  iban_prefix: "AT"
+  validation: "iban"
+
+# ====
+# KONFIGURACJA KWOT
+# ====
+amounts:
+  decimal_separator: ","
+  thousand_separator: "."
+  
+  total_gross:
+    keywords:
+      - "GESAMTBETRAG"
+      - "Gesamtbetrag"
+      - "ENDBETRAG"
+      - "Endbetrag"
+      - "SUMME"
+      - "Summe"
+      - "BRUTTO"
+      - "Brutto"
+      - "RECHNUNGSBETRAG"
+      - "Rechnungsbetrag"
+      - "ZU ZAHLEN"
+      - "Zu zahlen"
+      - "ZAHLBETRAG"
+    patterns:
+      - '(\d{1,3}(?:\.\d{3})*(?:,\d{2})?)\s*(?:€|EUR)'
+      - '(?:€|EUR)\s*(\d{1,3}(?:\.\d{3})*(?:,\d{2})?)'
+    required: true
+  
+  total_net:
+    keywords:
+      - "NETTO"
+      - "Netto"
+      - "NETTOBETRAG"
+      - "Nettobetrag"
+      - "ZWISCHENSUMME"
+      - "Bemessungsgrundlage"
+    fallback: "calculate_from_gross"
+    default_vat_rate: 20
+  
+  total_vat:
+    keywords:
+      - "MWST"
+      - "MwSt"
+      - "MEHRWERTSTEUER"
+      - "Mehrwertsteuer"
+      - "UST"
+      - "USt"
+      - "UMSATZSTEUER"
+      - "Steuer"
+    fallback: "calculate_difference"
+
+# ====
+# KONFIGURACJA PŁATNOŚCI
+# ====
+payment:
+  methods:
+    przelew:
+      keywords: ["ÜBERWEISUNG", "BANKÜBERWEISUNG", "TRANSFER", "VORKASSE", "ERLAGSCHEIN"]
+    gotówka:
+      keywords: ["BAR", "BARZAHLUNG", "CASH"]
+    karta:
+      keywords: ["KARTE", "KARTENZAHLUNG", "KREDITKARTE", "BANKOMATKARTE", "MAESTRO"]
+    lastschrift:
+      keywords: ["LASTSCHRIFT", "SEPA", "EINZUG", "ABBUCHUNG"]
+  
+  status:
+    opłacona:
+      keywords: ["BEZAHLT", "BEGLICHEN", "PAID", "ERHALTEN"]
+    częściowo_opłacona:
+      keywords: ["ANZAHLUNG", "TEILZAHLUNG", "TEILWEISE", "AKONTO"]
+    nieopłacona:
+      keywords: ["OFFEN", "UNBEZAHLT", "ZU ZAHLEN"]
+  
+  default_method: "przelew"
+  default_status: "nieopłacona"
+
+# ====
+# KONFIGURACJA POZYCJI FAKTURY
+# ====
+line_items:
+  enabled: true
+  
+  table_start:
+    keywords:
+      - "POS"
+      - "Pos"
+      - "NR"
+      - "BEZEICHNUNG"
+      - "Bezeichnung"
+      - "ARTIKEL"
+      - "Leistung"
+    patterns:
+      - 'Pos|POS|Nr\.'
+      - 'Bezeichnung.*Menge.*Preis'
+      - 'Artikel.*Anzahl.*Einzelpreis'
+      - 'Leistung.*Betrag'
+  
+  table_end:
+    keywords:
+      - "GESAMT"
+      - "Gesamt"
+      - "SUMME"
+      - "Summe"
+      - "ZWISCHENSUMME"
+      - "NETTO"
+  
+  skip_patterns:
+    - 'Seite \d+ von \d+'
+    - '-{3,}'
+    - '={3,}'
+
+# ====
+# OPCJE PARSOWANIA
+# ====
+options:
+  normalize_backslash: true
+  remove_extra_whitespace: true
+  case_insensitive_keywords: true
+  date_tolerance_days: 365
+  amount_tolerance: 0.02
+  tax_id_assignment_strategy: "context_proximity"
+  validate_iban: true
+  validate_tax_id: true
+  debug_mode: false
+
+# ====
+# METADANE
+# ====
+metadata:
+  author: "System"
+  version: "1.0"
+  created: "2025-11-29"
+  updated: "2025-11-29"
+  country: "Austria"
+  vat_rates: [20, 13, 10]

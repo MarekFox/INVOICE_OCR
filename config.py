@@ -274,7 +274,7 @@ class AppConfig:
 CONFIG = AppConfig()
 
 # Eksportowane stałe
-SUPPORTED_LANGUAGES = ['Polski', 'Niemiecki', 'Rumuński', 'Angielski']
+SUPPORTED_LANGUAGES = ['Polski', 'Niemiecki', 'Rumuński', 'Angielski', 'Austriacki']
 SUPPORTED_FORMATS = ['.pdf', '.png', '.jpg', '.jpeg', '.tiff']
 MAX_FILE_SIZE_MB = 100
 BATCH_PROCESSING_LIMIT = 100

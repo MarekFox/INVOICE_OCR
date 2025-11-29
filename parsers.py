@@ -36,6 +36,7 @@ class YAMLConfigLoader:
         'Niemiecki': 'de_generic.yml',
         'Rumuński': 'ro_generic.yml',
         'Angielski': 'en_generic.yml',
+        'Austriacki': 'at_generic.yml',
     }
     
     @classmethod

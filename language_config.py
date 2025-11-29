@@ -177,7 +177,47 @@ LANGUAGE_PROFILES = {
                 re.compile(r'[A-Z]{2}\d{2}\s?[A-Z0-9]{4}\s?\d{4}\s?\d{4}\s?\d{4}(?:\s?\d{0,4})?')
             ]
         }
+    ),
+
+    'Austriacki': LanguageProfile(
+        code='at',
+        tesseract_lang='deu',
+        paddle_lang='german',
+        decimal_separator=',',
+        thousand_separator='.',
+        currency_symbol='€',
+        date_formats=['%d.%m.%Y', '%Y-%m-%d'],
+        keywords={
+            'invoice_header': ['RECHNUNG', 'QUITTUNG', 'BELEG', 'FAKTURA'],
+            'seller': ['VERKÄUFER', 'LIEFERANT', 'ANBIETER', 'LEISTUNGSERBRINGER'],
+            'buyer': ['KÄUFER', 'KUNDE', 'EMPFÄNGER', 'AUFTRAGGEBER'],
+            'nip': ['UID-NR', 'UID', 'ATU', 'STEUERNUMMER', 'FINANZAMT'],
+            'payment': ['ZAHLUNG', 'ZAHLUNGSBEDINGUNGEN', 'FÄLLIGKEIT', 'ZAHLBAR'],
+            'bank': ['BANK', 'IBAN', 'BIC', 'SWIFT', 'KONTONUMMER'],
+            'summary': ['GESAMT', 'SUMME', 'TOTAL', 'BETRAG', 'ENDBETRAG'],
+            'items': ['POS', 'BEZEICHNUNG', 'MENGE', 'PREIS', 'BETRAG', 'NETTO', 'MWST', 'BRUTTO'],
+            'dates': ['RECHNUNGSDATUM', 'LIEFERDATUM', 'ZAHLUNGSZIEL'],
+            'signature': ['UNTERSCHRIFT', 'STEMPEL', 'AUSGESTELLT']
+        },
+        patterns={
+            'invoice_number': [
+                re.compile(r'Rechnungs?[-\s]?(?:nr|nummer)[:\s]*([A-Z0-9][A-Z0-9/\-\.]+)', re.I),
+                re.compile(r'(?:RNr|R\-Nr|RE)[:\s]*([A-Z0-9][A-Z0-9/\-\.]+)', re.I)
+            ],
+            'nip': [
+                re.compile(r'(?:UID[-\s]?Nr\.?|UID)[:\s]*(ATU\s?\d{8})', re.I),
+                re.compile(r'\b(ATU\s?\d{8})\b', re.I),
+                re.compile(r'Steuernummer[:\s]*(\d{2,3}[-/]\d{3,4})', re.I)
+            ],
+            'amount': [
+                re.compile(r'(\d{1,3}(?:\.\d{3})*(?:,\d{2})?)\s*(?:€|EUR)', re.I)
+            ],
+            'bank_account': [
+                re.compile(r'(?:AT\s?)?\d{2}\s?\d{4}\s?\d{4}\s?\d{4}\s?\d{4}')
+            ]
+        }
     )
+
 }
 
 class LanguageDetector:
