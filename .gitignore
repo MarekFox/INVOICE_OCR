@@ -20,7 +20,11 @@ OCR-7.py
 test*.py
 test_*.py
 *_test.py
+*test*.py
+yaml*.txt
 tests/
+faktury/
+wyniki/
 
 # -----------------------------------------------------------------------------
 # Python - pliki kompilacji

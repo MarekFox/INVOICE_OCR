@@ -2,8 +2,12 @@
 issuer: "Szablon Ogólny Niemiecki"
 description: "Domyślny szablon dla faktur w języku niemieckim"
 language: "Niemiecki"
+language_code: "de"
 priority: 1
 
+# ============================================
+# SŁOWA KLUCZOWE DO IDENTYFIKACJI DOKUMENTU
+# ============================================
 keywords:
   - "RECHNUNG"
   - "UST-IDNR"
@@ -13,210 +17,324 @@ keywords:
 
 exclude_keywords: []
 
-fields:
-  invoice_id:
-    parser: regex
-    patterns:
-      - 'Rechnungs?[-\s]?(?:nr|nummer)[:\s]*([A-Z0-9][A-Z0-9/\-\.]+)'
-      - '(?:RNr|R\-Nr)[:\s]*([A-Z0-9][A-Z0-9/\-\.]+)'
-      - 'Invoice[\s]*(?:No|#)[:\s]*([A-Z0-9/\-\.]+)'
-    group: 1
-    required: true
+# ============================================
+# KONFIGURACJA WALUTY
+# ============================================
+currency:
+  default: "EUR"
+  patterns:
+    EUR:
+      codes: ["EUR"]
+      symbols: ["€", "euro", "EURO", "Euro"]
+      weight: 1.0
+    CHF:
+      codes: ["CHF"]
+      symbols: ["Fr.", "Franken", "frank"]
+      weight: 0.8
+    PLN:
+      codes: ["PLN"]
+      symbols: ["zł", "Zloty"]
+      weight: 0.6
+  ignore_patterns:
+    - '[A-Z]{2}\d{2}[\s]?[A-Z0-9]{4}[\s]?[\d]{4}[\s]?[\d]{4}[\s]?[\d]{4}[\s]?[\d]{4}'
+    - '(?:DE|AT|CH)\s?\d{8,12}'
+    - '(?:USt-IdNr|Steuernummer)[:\s]*[A-Z0-9/\s]+'
 
-  invoice_type:
-    parser: keyword_detection
-    mapping:
-      "KORREKTUR": "KOREKTA"
-      "STORNORECHNUNG": "KOREKTA"
-      "PROFORMA": "PROFORMA"
-      "ANZAHLUNG": "ZALICZKOWA"
-    default: "VAT"
+# ============================================
+# KONFIGURACJA NUMERU FAKTURY
+# ============================================
+invoice_number:
+  prefixes:
+    - 'Rechnungs?[-\s]?(?:nr|nummer)[:\s]*'
+    - '(?:RNr|R\-Nr)[:\s]*'
+    - 'Rechnungsnummer[:\s]*'
+    - 'Invoice[\s]*(?:No|#)?[:\s]*'
+    - 'Beleg[-\s]?(?:Nr|nummer)[:\s]*'
+  patterns:
+    - '([A-Z]{1,4}[/\\-]\d{1,6}(?:[/\\-]\d{1,4}){0,2})'
+    - '(\d{1,6}[/\\-]\d{2,4}(?:[/\\-]\d{1,4})?)'
+    - '([A-Z]{1,4}[-_]\d{1,6}[-_]\d{2,4})'
+    - '(\d{4}[/\\-][A-Z]{1,4}[/\\-]\d{1,6})'
+    - '(\d{8,15})'
+    - '([A-Z]{2,5}\d{5,10})'
+  line_keywords:
+    - "RECHNUNG"
+    - "INVOICE"
+    - "BELEG"
 
+# ============================================
+# KONFIGURACJA TYPU FAKTURY
+# ============================================
+invoice_type:
+  default: "VAT"
+  mapping:
+    KOREKTA:
+      keywords: ["KORREKTUR", "STORNORECHNUNG", "GUTSCHRIFT", "CORRECTION"]
+    PROFORMA:
+      keywords: ["PROFORMA", "PRO FORMA", "PRO-FORMA"]
+    ZALICZKOWA:
+      keywords: ["ANZAHLUNG", "ABSCHLAG", "VORAUSZAHLUNG"]
+    KOŃCOWA:
+      keywords: ["SCHLUSSRECHNUNG", "ENDRECHNUNG", "FINAL"]
+
+# ============================================
+# KONFIGURACJA TYPU DOKUMENTU (ORYGINAŁ/KOPIA)
+# ============================================
+document_type:
+  default: "nieznany"
+  patterns:
+    oryginał:
+      - '\bORIGINAL\b'
+      - '\bURSCHRIFT\b'
+    kopia:
+      - '\bKOPIE\b'
+      - '\bCOPY\b'
+      - '\bABSCHRIFT\b'
+    duplikat:
+      - '\bDUPLIKAT\b'
+      - '\bDUPLICATE\b'
+      - '\bZWEITSCHRIFT\b'
+
+# ============================================
+# KONFIGURACJA DAT
+# ============================================
+dates:
+  formats:
+    - pattern: '\d{2}\.\d{2}\.\d{4}'
+      format: '%d.%m.%Y'
+    - pattern: '\d{4}-\d{2}-\d{2}'
+      format: '%Y-%m-%d'
+    - pattern: '\d{2}/\d{2}/\d{4}'
+      format: '%d/%m/%Y'
+    - pattern: '\d{1,2}\.\s?[A-Za-zäöü]+\s?\d{4}'
+      format: '%d. %B %Y'
+  
   issue_date:
-    parser: date
     keywords:
       - "RECHNUNGSDATUM"
       - "Rechnungsdatum"
       - "DATUM"
+      - "Datum"
+      - "AUSSTELLUNGSDATUM"
       - "Ausstellungsdatum"
-    patterns:
-      - '\d{2}\.\d{2}\.\d{4}'
-      - '\d{4}-\d{2}-\d{2}'
-    formats:
-      - '%d.%m.%Y'
-      - '%Y-%m-%d'
+      - "Ausgestellt am"
     search_range: 150
     required: true
-
+  
   sale_date:
-    parser: date
     keywords:
       - "LIEFERDATUM"
+      - "Lieferdatum"
+      - "LEISTUNGSDATUM"
       - "Leistungsdatum"
+      - "LIEFERUNG"
       - "Lieferung"
-    patterns:
-      - '\d{2}\.\d{2}\.\d{4}'
-    formats:
-      - '%d.%m.%Y'
+      - "Leistungszeitraum"
+    search_range: 150
     fallback: "use_issue_date"
-
+  
   due_date:
-    parser: date
     keywords:
       - "ZAHLBAR BIS"
+      - "Zahlbar bis"
+      - "FÄLLIGKEITSDATUM"
       - "Fälligkeitsdatum"
+      - "ZAHLUNGSZIEL"
       - "Zahlungsziel"
-    patterns:
-      - '\d{2}\.\d{2}\.\d{4}'
-    formats:
-      - '%d.%m.%Y'
-    fallback: "add_days:14"
+      - "Fällig am"
+      - "Zahlung bis"
+    search_range: 150
+    fallback_days: 14
 
-  supplier_name:
-    parser: context_extraction
+# ============================================
+# KONFIGURACJA NIP/IDENTYFIKATORÓW PODATKOWYCH
+# ============================================
+tax_id:
+  name: "USt-IdNr"
+  patterns:
+    - '(?:UST[-\s]?ID[-\s]?Nr|USt[-\s]?IdNr)[:\s]*(DE\s?\d{9})'
+    - 'Steuernummer[:\s]*(\d{2,3}/\d{3}/\d{5})'
+    - 'St[-\.]?Nr[:\s]*(\d{2,3}/\d{3}/\d{5})'
+    - '(?:UID|VAT)[-\s]?(?:Nr)?[:\s]*(DE\s?\d{9})'
+    - '\b(DE\s?\d{9})\b'
+  validation:
+    type: "vat_de"
+    length: 11
+  prefix: "DE"
+
+# ============================================
+# KONFIGURACJA STRON (SPRZEDAWCA/NABYWCA)
+# ============================================
+parties:
+  seller:
     keywords:
       - "VERKÄUFER"
+      - "Verkäufer"
       - "LIEFERANT"
+      - "Lieferant"
       - "ANBIETER"
-    extraction_strategy: "next_line"
-    fallback: "NOT_FOUND"
-    required: true
-
-  supplier_tax_id:
-    parser: regex
-    patterns:
-      - '(?:UST[-\s]?ID[-\s]?Nr|USt[-\s]?IdNr)[:\s]*(DE\s?\d{9})'
-      - 'Steuernummer[:\s]*(\d{2,3}/\d{3}/\d{5})'
-    group: 1
-    context_keywords:
-      - "VERKÄUFER"
-      - "LIEFERANT"
+      - "Anbieter"
+      - "RECHNUNGSSTELLER"
+      - "Absender"
     context_range: 300
-    required: true
-
-  supplier_address:
-    parser: address_extraction
-    context_keywords:
-      - "VERKÄUFER"
-    patterns:
-      - '(\d{5}\s+[A-ZÄÖÜ][a-zäöüß]+)'
-    context_range: 400
-
-  supplier_accounts:
-    parser: bank_accounts
-    patterns:
-      - '(?:DE\s?)?\d{2}\s?\d{4}\s?\d{4}\s?\d{4}\s?\d{4}\s?\d{2}'
-      - 'IBAN[:\s]*([A-Z]{2}\d{2}[A-Z0-9\s]+)'
-    validator: iban
-    multiple: true
-
-  buyer_name:
-    parser: context_extraction
+  
+  buyer:
     keywords:
       - "KÄUFER"
+      - "Käufer"
       - "KUNDE"
+      - "Kunde"
       - "EMPFÄNGER"
-    extraction_strategy: "next_line"
-    fallback: "NOT_FOUND"
-    required: true
-
-  buyer_tax_id:
-    parser: regex
-    patterns:
-      - '(?:UST[-\s]?ID[-\s]?Nr|USt[-\s]?IdNr)[:\s]*(DE\s?\d{9})'
-      - 'Steuernummer[:\s]*(\d{2,3}/\d{3}/\d{5})'
-    group: 1
-    context_keywords:
-      - "KÄUFER"
-      - "KUNDE"
+      - "Empfänger"
+      - "RECHNUNGSEMPFÄNGER"
+      - "Besteller"
     context_range: 300
 
-  buyer_address:
-    parser: address_extraction
-    context_keywords:
-      - "KÄUFER"
-    patterns:
-      - '(\d{5}\s+[A-ZÄÖÜ][a-zäöüß]+)'
-    context_range: 400
+# ============================================
+# KONFIGURACJA ADRESÓW
+# ============================================
+address:
+  patterns:
+    - '(\d{5}\s+[A-ZÄÖÜ][a-zäöüß]+(?:\s+[A-ZÄÖÜ][a-zäöüß]+)*)'
+    - '([A-ZÄÖÜ][a-zäöüß]+(?:straße|str\.|weg|platz|allee)\s+\d+[a-z]?)'
+  postal_code_pattern: '\d{5}'
+  context_range: 400
 
+# ============================================
+# KONFIGURACJA KONT BANKOWYCH
+# ============================================
+bank_accounts:
+  patterns:
+    - '(?:DE\s?)?\d{2}\s?\d{4}\s?\d{4}\s?\d{4}\s?\d{4}\s?\d{2}'
+    - 'IBAN[:\s]*([A-Z]{2}\d{2}[A-Z0-9\s]+)'
+    - 'DE\d{2}\s?\d{4}\s?\d{4}\s?\d{4}\s?\d{4}\s?\d{2}'
+  iban_prefix: "DE"
+  validation: "iban"
+
+# ============================================
+# KONFIGURACJA KWOT
+# ============================================
+amounts:
+  decimal_separator: ","
+  thousand_separator: "."
+  
   total_gross:
-    parser: money
     keywords:
       - "GESAMTBETRAG"
+      - "Gesamtbetrag"
       - "ENDBETRAG"
+      - "Endbetrag"
       - "SUMME"
+      - "Summe"
       - "BRUTTO"
+      - "Brutto"
+      - "RECHNUNGSBETRAG"
+      - "Rechnungsbetrag"
+      - "ZU ZAHLEN"
+      - "Zu zahlen"
     patterns:
       - '(\d{1,3}(?:\.\d{3})*(?:,\d{2})?)\s*(?:€|EUR)'
-    currency: "EUR"
-    decimal_separator: ","
-    thousand_separator: "."
+      - '(?:€|EUR)\s*(\d{1,3}(?:\.\d{3})*(?:,\d{2})?)'
     required: true
-
+  
   total_net:
-    parser: money
     keywords:
       - "NETTO"
+      - "Netto"
       - "NETTOBETRAG"
-    patterns:
-      - '(\d{1,3}(?:\.\d{3})*(?:,\d{2})?)\s*(?:€|EUR)?'
-    currency: "EUR"
-    fallback: "calculate_from_gross:19"
-
+      - "Nettobetrag"
+      - "ZWISCHENSUMME"
+    fallback: "calculate_from_gross"
+    default_vat_rate: 19
+  
   total_vat:
-    parser: money
     keywords:
       - "MWST"
+      - "MwSt"
       - "MEHRWERTSTEUER"
+      - "Mehrwertsteuer"
       - "UST"
-    patterns:
-      - '(\d{1,3}(?:\.\d{3})*(?:,\d{2})?)\s*(?:€|EUR)?'
-    currency: "EUR"
+      - "USt"
+      - "UMSATZSTEUER"
     fallback: "calculate_difference"
 
-  currency:
-    parser: static
-    value: "EUR"
+# ============================================
+# KONFIGURACJA PŁATNOŚCI
+# ============================================
+payment:
+  methods:
+    przelew:
+      keywords: ["ÜBERWEISUNG", "BANKÜBERWEISUNG", "TRANSFER", "VORKASSE"]
+    gotówka:
+      keywords: ["BAR", "BARZAHLUNG", "CASH"]
+    karta:
+      keywords: ["KARTE", "KARTENZAHLUNG", "KREDITKARTE", "EC-KARTE"]
+    lastschrift:
+      keywords: ["LASTSCHRIFT", "SEPA", "EINZUG"]
+  
+  status:
+    opłacona:
+      keywords: ["BEZAHLT", "BEGLICHEN", "PAID", "ERHALTEN"]
+    częściowo_opłacona:
+      keywords: ["ANZAHLUNG", "TEILZAHLUNG", "TEILWEISE"]
+    nieopłacona:
+      keywords: ["OFFEN", "UNBEZAHLT", "ZU ZAHLEN"]
+  
+  default_method: "przelew"
+  default_status: "nieopłacona"
 
-lines:
+# ============================================
+# KONFIGURACJA POZYCJI FAKTURY
+# ============================================
+line_items:
   enabled: true
-  start:
+  
+  table_start:
+    keywords:
+      - "POS"
+      - "Pos"
+      - "NR"
+      - "BEZEICHNUNG"
+      - "Bezeichnung"
+      - "ARTIKEL"
     patterns:
       - 'Pos|POS|Nr\.'
       - 'Bezeichnung.*Menge.*Preis'
-  end:
-    patterns:
-      - 'Gesamt|GESAMT|Summe|SUMME'
-  line_pattern: '^(\d+)\s+(.+?)\s+([\d,\.]+)\s+([\d,\.]+)\s+([\d,\.]+)$'
-  line_fields:
-    - name: position
-      group: 1
-      type: int
-    - name: description
-      group: 2
-      type: string
-    - name: quantity
-      group: 3
-      type: decimal
-    - name: price_unit
-      group: 4
-      type: decimal
-    - name: total
-      group: 5
-      type: decimal
-  skip_lines:
-    patterns:
-      - 'Seite \d+ von \d+'
+      - 'Artikel.*Anzahl.*Einzelpreis'
+  
+  table_end:
+    keywords:
+      - "GESAMT"
+      - "Gesamt"
+      - "SUMME"
+      - "Summe"
+      - "ZWISCHENSUMME"
+      - "NETTO"
+  
+  skip_patterns:
+    - 'Seite \d+ von \d+'
+    - '-{3,}'
+    - '={3,}'
 
+# ============================================
+# OPCJE PARSOWANIA
+# ============================================
 options:
-  remove_whitespace: true
+  normalize_backslash: true
+  remove_extra_whitespace: true
+  case_insensitive_keywords: true
   date_tolerance_days: 365
   amount_tolerance: 0.02
   tax_id_assignment_strategy: "context_proximity"
   validate_iban: true
+  validate_tax_id: true
   debug_mode: false
 
+# ============================================
+# METADANE
+# ============================================
 metadata:
   author: "System"
-  version: "1.0"
+  version: "2.0"
   created: "2025-11-29"
+  updated: "2025-11-29"

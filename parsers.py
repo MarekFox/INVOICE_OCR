@@ -1,11 +1,12 @@
 """
-FAKTURA BOT v5.0 - Invoice Parsers
+FAKTURA BOT v5.1 - Invoice Parsers (YAML-Driven)
 ====
-Zaawansowane parsery do ekstrakcji danych z faktur
-UPDATED: Ulepszone wykrywanie numeru faktury, waluty, oryginał/kopia
+Parsery kierowane konfiguracją YAML - logika w Pythonie, dane w YAML
 """
 
 import re
+import yaml
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 from decimal import Decimal
 from datetime import datetime, timedelta
@@ -19,553 +20,619 @@ from validators import InvoiceValidator
 logger = logging.getLogger(__name__)
 
 
-# ==============================================================================
+# ============================================
+# YAML CONFIG LOADER
+# ============================================
+
+class YAMLConfigLoader:
+    """Ładuje i cache'uje konfigurację z plików YAML"""
+    
+    _cache: Dict[str, Dict] = {}
+    _config_dir: Path = Path(__file__).parent
+    
+    # Mapowanie języków na pliki YAML
+    LANGUAGE_FILES = {
+        'Polski': 'pl_generic.yml',
+        'Niemiecki': 'de_generic.yml',
+        'Rumuński': 'ro_generic.yml',
+        'Angielski': 'en_generic.yml',
+    }
+    
+    @classmethod
+    def get_config(cls, language: str = 'Polski') -> Dict:
+        """Ładuje konfigurację z pliku YAML"""
+        filename = cls.LANGUAGE_FILES.get(language, 'pl_generic.yml')
+        
+        if filename in cls._cache:
+            return cls._cache[filename]
+        
+        # Poprawiona ścieżka: templates/default/
+        filepath = cls._config_dir / 'templates' / 'default' / filename
+        
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                config = yaml.safe_load(f)
+                cls._cache[filename] = config
+                logger.info(f"Załadowano konfigurację YAML: {filepath}")
+                return config
+        except FileNotFoundError:
+            logger.warning(f"Nie znaleziono pliku YAML: {filepath}, używam domyślnej konfiguracji")
+            return cls._get_default_config()
+        except Exception as e:
+            logger.error(f"Błąd ładowania YAML {filepath}: {e}")
+            return cls._get_default_config()
+    
+    @classmethod
+    def _get_default_config(cls) -> Dict:
+        """Zwraca domyślną konfigurację gdy brak pliku YAML"""
+        return {
+            'currency': {'symbols': ['PLN', 'EUR', 'USD', 'zł'], 'default': 'PLN'},
+            'invoice_number': {'prefixes': ['FV', 'FA', 'F/', 'NR'], 'patterns': []},
+            'dates': {'formats': ['%d.%m.%Y', '%Y-%m-%d', '%d/%m/%Y']},
+        }
+
+
+# ============================================
 # DATACLASS: ParsedInvoice
-# ==============================================================================
+# ============================================
 
 @dataclass
 class ParsedInvoice:
     """Struktura sparsowanej faktury"""
-    # Pola WYMAGANE (bez wartości domyślnych) muszą być PIERWSZE
+    # Pola WYMAGANE
     invoice_id: str
-    invoice_type: str  # FAKTURA VAT, PROFORMA, KOREKTA
+    invoice_type: str
     issue_date: datetime
     sale_date: datetime
     due_date: datetime
-
-    # Dostawca - pola wymagane
     supplier_name: str
     supplier_tax_id: str
     supplier_address: str
     supplier_accounts: List[str]
-
-    # Nabywca - pola wymagane
     buyer_name: str
     buyer_tax_id: str
     buyer_address: str
-
-    # Finanse - pola wymagane
     currency: str
     language: str
     raw_text: str
 
-    # Pola OPCJONALNE (z wartościami domyślnymi) muszą być NA KOŃCU
+    # Pola OPCJONALNE
     supplier_email: Optional[str] = None
     supplier_phone: Optional[str] = None
     buyer_email: Optional[str] = None
     buyer_phone: Optional[str] = None
-
-    # Pozycje
     line_items: List[Dict] = field(default_factory=list)
-
-    # Podsumowanie
     total_net: Decimal = Decimal('0')
     total_vat: Decimal = Decimal('0')
     total_gross: Decimal = Decimal('0')
     vat_breakdown: List[Dict] = field(default_factory=list)
-
-    # Płatność
     payment_method: str = 'przelew'
     payment_status: str = 'nieopłacona'
     paid_amount: Decimal = Decimal('0')
-
-    # Metadane
     confidence: float = 0.0
     parsing_errors: List[str] = field(default_factory=list)
     parsing_warnings: List[str] = field(default_factory=list)
     page_range: Tuple[int, int] = (1, 1)
-
-    # Flagi
     is_correction: bool = False
     is_proforma: bool = False
     is_duplicate: bool = False
     is_verified: bool = False
     belongs_to_user: bool = False
-
-    # NOWE: Typ dokumentu (oryginał/kopia)
-    document_type: str = 'nieznany'  # 'oryginał', 'kopia', 'duplikat', 'nieznany'
-
-    # NOWE: Seria faktury (dla rumuńskich faktur)
+    document_type: str = 'nieznany'
     invoice_series: Optional[str] = None
 
 
-# ==============================================================================
-# KLASA: CurrencyDetector - Inteligentne wykrywanie waluty
-# ==============================================================================
+# ============================================
+# YAML-DRIVEN EXTRACTORS
+# ============================================
 
 class CurrencyDetector:
-    """Inteligentne wykrywanie waluty z ignorowaniem numerów kont i EU VAT"""
-
-    # Definicje walut i ich fraz
-    CURRENCY_PATTERNS = {
-        'PLN': {
-            'codes': ['PLN'],
-            'symbols': ['zł', 'złotych', 'złoty', 'złote', 'zlotych', 'zloty'],
-            'weight': 1.0
-        },
-        'RON': {
-            'codes': ['RON'],
-            'symbols': ['lei', 'leu', 'LEI', 'LEU'],
-            'weight': 1.0
-        },
-        'EUR': {
-            'codes': ['EUR'],
-            'symbols': ['€', 'euro', 'EURO', 'eur'],
-            'weight': 1.0
-        },
-        'USD': {
-            'codes': ['USD'],
-            'symbols': ['$', 'dolar', 'dolarów', 'dollars'],
-            'weight': 1.0
-        },
-        'GBP': {
-            'codes': ['GBP'],
-            'symbols': ['£', 'funt', 'funtów', 'pounds'],
-            'weight': 1.0
-        },
-        'CZK': {
-            'codes': ['CZK'],
-            'symbols': ['Kč', 'korun', 'korona'],
-            'weight': 1.0
-        },
-        'CHF': {
-            'codes': ['CHF'],
-            'symbols': ['frank', 'franków', 'franken'],
-            'weight': 1.0
-        }
-    }
-
-    # Wzorce do ignorowania (numery kont, EU VAT, itp.)
-    IGNORE_PATTERNS = [
-        # IBAN - różne formaty
-        r'[A-Z]{2}\d{2}[\s]?[A-Z0-9]{4}[\s]?[\d]{4}[\s]?[\d]{4}[\s]?[\d]{4}[\s]?[\d]{4}[\s]?[\d]{0,4}',
-        r'[A-Z]{2}\d{2}\s?\d{4}\s?\d{4}\s?\d{4}\s?\d{4}\s?\d{4}\s?\d{0,4}',
-        # Numer konta bez IBAN
-        r'\d{2}[\s]?\d{4}[\s]?\d{4}[\s]?\d{4}[\s]?\d{4}[\s]?\d{4}[\s]?\d{4}',
-        # EU VAT ID (np. PL1234567890, RO12345678)
-        r'(?:PL|RO|DE|FR|IT|ES|NL|BE|AT|CZ|SK|HU|BG|HR|SI|LT|LV|EE|FI|SE|DK|IE|PT|GR|CY|MT|LU)\s?\d{8,12}',
-        # NIP z prefiksem kraju
-        r'(?:NIP|VAT|CUI|CIF)[:\s]*(?:PL|RO|DE)?[\s-]?\d{8,12}',
-        # Swift/BIC
-        r'[A-Z]{4}[A-Z]{2}[A-Z0-9]{2}(?:[A-Z0-9]{3})?',
-    ]
-
-    @classmethod
-    def detect_currency(cls, text: str, default_language: str = 'Polski') -> Tuple[str, float]:
-        """
-        Wykrywa walutę w tekście z inteligentnym filtrowaniem.
-
-        Returns:
-            Tuple[str, float]: (kod_waluty, pewność 0.0-1.0)
-        """
-        # Krok 1: Usuń fragmenty do ignorowania
-        clean_text = cls._remove_ignored_sections(text)
-
-        # Krok 2: Zlicz wystąpienia każdej waluty
+    """Wykrywanie waluty na podstawie konfiguracji YAML"""
+    
+    def __init__(self, config: Dict):
+        self.config = config.get('currency', {})
+        self.default = self.config.get('default', 'PLN')
+        self.patterns = self.config.get('patterns', {})
+        self.ignore_patterns = self.config.get('ignore_patterns', [])
+    
+    def detect(self, text: str) -> Tuple[str, float]:
+        """Wykrywa walutę w tekście"""
+        clean_text = self._remove_ignored_sections(text)
         currency_scores = {}
-
-        for currency, config in cls.CURRENCY_PATTERNS.items():
+        
+        for currency, cfg in self.patterns.items():
             score = 0
-
-            # Szukaj kodów walut (np. PLN, EUR)
-            for code in config['codes']:
-                # Szukaj kodu jako osobnego słowa (nie części innego słowa)
+            codes = cfg.get('codes', [])
+            symbols = cfg.get('symbols', [])
+            weight = cfg.get('weight', 1.0)
+            
+            # Szukaj kodów walut
+            for code in codes:
                 pattern = r'\b' + re.escape(code) + r'\b'
                 matches = re.findall(pattern, clean_text, re.IGNORECASE)
-                score += len(matches) * 2  # Kody mają wyższą wagę
-
-            # Szukaj symboli i nazw
-            for symbol in config['symbols']:
-                # Dla krótkich symboli (zł, €) szukaj dokładnie
+                score += len(matches) * 2
+            
+            # Szukaj symboli
+            for symbol in symbols:
                 if len(symbol) <= 2:
                     pattern = re.escape(symbol)
                 else:
-                    # Dla dłuższych słów szukaj jako osobne słowo
                     pattern = r'\b' + re.escape(symbol) + r'\b'
-
                 matches = re.findall(pattern, clean_text, re.IGNORECASE)
                 score += len(matches)
-
+            
             if score > 0:
-                currency_scores[currency] = score * config['weight']
-
-        logger.info(f"💰 Wykryte waluty: {currency_scores}")
-
-        # Krok 3: Wybierz walutę z najwyższym wynikiem
+                currency_scores[currency] = score * weight
+        
+        logger.debug(f"Wykryte waluty: {currency_scores}")
+        
         if currency_scores:
-            best_currency = max(currency_scores, key=currency_scores.get)
-            total_score = sum(currency_scores.values())
-            confidence = currency_scores[best_currency] / total_score if total_score > 0 else 0.5
-
-            logger.info(f"✅ Wybrana waluta: {best_currency} (pewność: {confidence:.2f})")
-            return best_currency, confidence
-
-        # Krok 4: Fallback na podstawie języka
-        language_defaults = {
-            'Polski': 'PLN',
-            'Rumuński': 'RON',
-            'Niemiecki': 'EUR',
-            'Angielski': 'EUR'
-        }
-
-        default_currency = language_defaults.get(default_language, 'PLN')
-        logger.warning(f"⚠️ Nie wykryto waluty, używam domyślnej: {default_currency}")
-        return default_currency, 0.3
-
-    @classmethod
-    def _remove_ignored_sections(cls, text: str) -> str:
-        """Usuwa sekcje do ignorowania (numery kont, VAT ID, itp.)"""
-        clean_text = text
-
-        for pattern in cls.IGNORE_PATTERNS:
+            best = max(currency_scores, key=currency_scores.get)
+            total = sum(currency_scores.values())
+            confidence = currency_scores[best] / total if total > 0 else 0.5
+            logger.info(f"Waluta: {best} (pewność: {confidence:.2f})")
+            return best, confidence
+        
+        logger.warning(f"Nie wykryto waluty, domyślna: {self.default}")
+        return self.default, 0.3
+    
+    def _remove_ignored_sections(self, text: str) -> str:
+        """Usuwa sekcje do ignorowania"""
+        clean = text
+        for pattern in self.ignore_patterns:
             try:
-                clean_text = re.sub(pattern, ' [IGNORED] ', clean_text, flags=re.IGNORECASE)
+                clean = re.sub(pattern, ' ', clean, flags=re.IGNORECASE)
             except re.error:
                 continue
+        return clean
 
-        return clean_text
-
-
-# ==============================================================================
-# KLASA: InvoiceNumberExtractor - Zaawansowane wykrywanie numeru faktury
-# ==============================================================================
 
 class InvoiceNumberExtractor:
-    """Zaawansowane wykrywanie numeru faktury z obsługą wielu formatów"""
-
-    # Frazy poprzedzające numer faktury
-    INVOICE_PREFIXES = [
-        # Polski
-        r'Faktura\s+VAT[_\s-]*(?:nr|numer)?[:\s]*',
-        r'Faktura[_\s-]*(?:nr|numer)?[:\s]*',
-        r'FV[_\s-]*(?:nr)?[:\s]*',
-        r'F[_\s-]*(?:nr)?[:\s]*',
-        r'Nr\s+faktury[:\s]*',
-        r'Numer\s+faktury[:\s]*',
-        r'Dokument[:\s]*',
-        # Angielski
-        r'Invoice[_\s-]*(?:no|number|#)?[:\s]*',
-        r'Inv[_\s-]*(?:no|#)?[:\s]*',
-        # Niemiecki
-        r'Rechnung[_\s-]*(?:Nr|Nummer)?[:\s]*',
-        r'Rechnungsnummer[:\s]*',
-        # Rumuński
-        r'Factura[_\s-]*(?:nr|numar)?[:\s]*',
-        r'Factura\s+fiscala\s+seria\s+',
-        r'Serie\s+si\s+numar[:\s]*',
-    ]
-
-    # Wzorce numerów faktur
-    NUMBER_PATTERNS = [
-        # FV/123/2025, FV/123/11/2025
-        r'([A-Z]{1,4}[/\\-]\d{1,6}(?:[/\\-]\d{1,4}){0,2})',
-        # 123/2025, 123/11/2025
-        r'(\d{1,6}[/\\-]\d{2,4}(?:[/\\-]\d{1,4})?)',
-        # FV-123-2025
-        r'([A-Z]{1,4}[-_]\d{1,6}[-_]\d{2,4})',
-        # 2025/FV/123
-        r'(\d{4}[/\\-][A-Z]{1,4}[/\\-]\d{1,6})',
-        # Ciągły numer z literami: 013111112025IG
-        r'(\d{6,15}[A-Z]{1,4})',
-        # Ciągły numer: 2025001234
-        r'(\d{8,15})',
-        # Seria + numer (rumuński): Dov H 00005164, ABC 123456
-        r'([A-Z]{1,5}\s+[A-Z]?\s*\d{5,10})',
-        # Z prefiksem literowym: ABC123456
-        r'([A-Z]{2,5}\d{5,10})',
-    ]
-
-    @classmethod
-    def extract(cls, text: str, language: str = 'Polski') -> Tuple[str, Optional[str]]:
-        """
-        Ekstraktuje numer faktury z tekstu.
-
-        Returns:
-            Tuple[str, Optional[str]]: (numer_faktury, seria_faktury lub None)
-        """
-        # Normalizuj tekst - zamień backslash na slash
-        normalized_text = text.replace('\\', '/')
-
-        # Krok 1: Szukaj numeru po frazach kluczowych
-        for prefix_pattern in cls.INVOICE_PREFIXES:
-            full_pattern = prefix_pattern + r'([^\n]{3,50})'
-
-            match = re.search(full_pattern, normalized_text, re.IGNORECASE | re.MULTILINE)
+    """Ekstrakcja numeru faktury na podstawie YAML"""
+    
+    def __init__(self, config: Dict):
+        self.config = config.get('invoice_number', {})
+        self.prefixes = self.config.get('prefixes', [])
+        self.patterns = self.config.get('patterns', [])
+        self.line_keywords = self.config.get('line_keywords', [])
+        self.series_pattern = self.config.get('series_pattern')
+    
+    def extract(self, text: str) -> Tuple[str, Optional[str]]:
+        """Ekstraktuje numer faktury"""
+        normalized = text.replace('\\', '/')
+        
+        # Krok 1: Szukaj po frazach kluczowych
+        for prefix in self.prefixes:
+            full_pattern = prefix + r'([^\n]{3,50})'
+            match = re.search(full_pattern, normalized, re.IGNORECASE | re.MULTILINE)
             if match:
                 candidate = match.group(1).strip()
-
-                # Wyczyść kandydata
-                invoice_number = cls._clean_invoice_number(candidate)
-
+                invoice_number = self._clean(candidate)
                 if invoice_number and invoice_number.lower() != 'nr':
-                    logger.info(f"✅ Numer faktury (po frazie): {invoice_number}")
-
-                    # Sprawdź czy to rumuńska seria
-                    series = cls._extract_romanian_series(candidate)
+                    logger.info(f"Numer faktury (fraza): {invoice_number}")
+                    series = self._extract_series(candidate)
                     return invoice_number, series
-
-        # Krok 2: Szukaj w następnej linii po frazie
-        lines = normalized_text.split('\n')
+        
+        # Krok 2: Szukaj w liniach ze słowami kluczowymi
+        lines = normalized.split('\n')
         for i, line in enumerate(lines):
             line_upper = line.upper()
-
-            if any(kw in line_upper for kw in ['FAKTURA', 'INVOICE', 'RECHNUNG', 'FACTURA']):
-                # Sprawdź czy numer jest w tej samej linii
-                for pattern in cls.NUMBER_PATTERNS:
+            if any(kw.upper() in line_upper for kw in self.line_keywords):
+                for pattern in self.patterns:
                     match = re.search(pattern, line, re.IGNORECASE)
                     if match:
-                        invoice_number = cls._clean_invoice_number(match.group(1))
+                        invoice_number = self._clean(match.group(1))
                         if invoice_number and invoice_number.lower() != 'nr':
-                            logger.info(f"✅ Numer faktury (ta sama linia): {invoice_number}")
+                            logger.info(f"Numer faktury (linia): {invoice_number}")
                             return invoice_number, None
-
+                
                 # Sprawdź następną linię
                 if i + 1 < len(lines):
                     next_line = lines[i + 1].strip()
-                    for pattern in cls.NUMBER_PATTERNS:
+                    for pattern in self.patterns:
                         match = re.search(pattern, next_line, re.IGNORECASE)
                         if match:
-                            invoice_number = cls._clean_invoice_number(match.group(1))
+                            invoice_number = self._clean(match.group(1))
                             if invoice_number and invoice_number.lower() != 'nr':
-                                logger.info(f"✅ Numer faktury (następna linia): {invoice_number}")
+                                logger.info(f"Numer faktury (następna linia): {invoice_number}")
                                 return invoice_number, None
-
-        # Krok 3: Szukaj wzorców numerów w całym tekście
-        for pattern in cls.NUMBER_PATTERNS:
-            matches = re.findall(pattern, normalized_text, re.IGNORECASE)
+        
+        # Krok 3: Szukaj wzorców w całym tekście
+        for pattern in self.patterns:
+            matches = re.findall(pattern, normalized, re.IGNORECASE)
             for match in matches:
-                invoice_number = cls._clean_invoice_number(match)
+                invoice_number = self._clean(match)
                 if invoice_number and len(invoice_number) >= 5:
-                    # Sprawdź czy to nie jest NIP, IBAN, data
-                    if not cls._is_false_positive(invoice_number, normalized_text):
-                        logger.info(f"✅ Numer faktury (wzorzec): {invoice_number}")
+                    if not self._is_false_positive(invoice_number, normalized):
+                        logger.info(f"Numer faktury (wzorzec): {invoice_number}")
                         return invoice_number, None
-
-        logger.warning("⚠️ Nie znaleziono numeru faktury")
+        
+        logger.warning("Nie znaleziono numeru faktury")
         return "UNKNOWN", None
-
-    @classmethod
-    def _clean_invoice_number(cls, raw: str) -> str:
-        """Czyści surowy numer faktury"""
+    
+    def _clean(self, raw: str) -> str:
+        """Czyści numer faktury"""
         if not raw:
             return ""
-
-        # Usuń zbędne znaki na początku i końcu
         cleaned = raw.strip()
         cleaned = re.sub(r'^[:\s-]+', '', cleaned)
         cleaned = re.sub(r'[:\s]+$', '', cleaned)
-
-        # Usuń słowa kluczowe które mogły się wkraść
         cleaned = re.sub(r'^(?:nr|numer|no|number)[:\s]*', '', cleaned, flags=re.IGNORECASE)
-
-        # Normalizuj separatory
         cleaned = cleaned.replace('\\', '/')
-
-        # Usuń podwójne separatory
         cleaned = re.sub(r'[/]{2,}', '/', cleaned)
-        cleaned = re.sub(r'[-]{2,}', '-', cleaned)
-
         return cleaned.strip()
-
-    @classmethod
-    def _extract_romanian_series(cls, text: str) -> Optional[str]:
-        """Ekstraktuje serię faktury dla rumuńskich dokumentów"""
-        # Wzorzec: "seria Dov H nr 00005164" -> seria = "Dov H"
-        match = re.search(r'seria\s+([A-Z]{1,5}(?:\s+[A-Z])?)', text, re.IGNORECASE)
-        if match:
-            return match.group(1).strip()
+    
+    def _extract_series(self, text: str) -> Optional[str]:
+        """Ekstraktuje serię faktury"""
+        if self.series_pattern:
+            match = re.search(self.series_pattern, text, re.IGNORECASE)
+            if match:
+                return match.group(1).strip()
         return None
-
-    @classmethod
-    def _is_false_positive(cls, candidate: str, full_text: str) -> bool:
-        """Sprawdza czy kandydat to fałszywy pozytyw (NIP, IBAN, data, itp.)"""
-        # Sprawdź czy to NIP (10 cyfr)
-        digits_only = re.sub(r'\D', '', candidate)
-        if len(digits_only) == 10:
-            # Sprawdź czy występuje w kontekście NIP
-            nip_context = re.search(r'NIP[:\s]*' + re.escape(candidate), full_text, re.IGNORECASE)
-            if nip_context:
+    
+    def _is_false_positive(self, candidate: str, full_text: str) -> bool:
+        """Sprawdza fałszywe pozytywy"""
+        digits = re.sub(r'\D', '', candidate)
+        if len(digits) == 10:
+            if re.search(r'NIP[:\s]*' + re.escape(candidate), full_text, re.IGNORECASE):
                 return True
-
-        # Sprawdź czy to data
         if re.match(r'^\d{2}[./-]\d{2}[./-]\d{4}$', candidate):
             return True
-
-        # Sprawdź czy to IBAN
         if re.match(r'^[A-Z]{2}\d{2}', candidate):
             return True
-
         return False
 
 
-# ==============================================================================
-# KLASA: DocumentTypeDetector - Wykrywanie oryginał/kopia
-# ==============================================================================
+class InvoiceTypeDetector:
+    """Wykrywanie typu faktury na podstawie YAML"""
+    
+    def __init__(self, config: Dict):
+        self.config = config.get('invoice_type', {})
+        self.default = self.config.get('default', 'VAT')
+        self.mapping = self.config.get('mapping', {})
+    
+    def detect(self, text: str) -> str:
+        """Wykrywa typ faktury"""
+        text_upper = text.upper()
+        
+        for inv_type, cfg in self.mapping.items():
+            keywords = cfg.get('keywords', [])
+            for kw in keywords:
+                if kw.upper() in text_upper:
+                    logger.info(f"Typ faktury: {inv_type}")
+                    return inv_type
+        
+        return self.default
+
 
 class DocumentTypeDetector:
-    """Wykrywanie typu dokumentu: oryginał, kopia, duplikat"""
-
-    PATTERNS = {
-        'oryginał': [
-            r'\bORYGINAŁ\b',
-            r'\bORYGINAL\b',
-            r'\bORIGINAL\b',
-            r'\bORIGINALE\b',
-        ],
-        'kopia': [
-            r'\bKOPIA\b',
-            r'\bCOPY\b',
-            r'\bCOPIE\b',
-            r'\bKOPIE\b',
-        ],
-        'duplikat': [
-            r'\bDUPLIKAT\b',
-            r'\bDUPLICATE\b',
-            r'\bDUPLICAT\b',
-        ]
-    }
-
-    @classmethod
-    def detect(cls, text: str) -> Tuple[str, bool]:
-        """
-        Wykrywa typ dokumentu.
-
-        Returns:
-            Tuple[str, bool]: (typ_dokumentu, czy_znaleziono)
-        """
+    """Wykrywanie typu dokumentu (oryginał/kopia) na podstawie YAML"""
+    
+    def __init__(self, config: Dict):
+        self.config = config.get('document_type', {})
+        self.default = self.config.get('default', 'nieznany')
+        self.patterns = self.config.get('patterns', {})
+    
+    def detect(self, text: str) -> Tuple[str, bool]:
+        """Wykrywa typ dokumentu"""
         text_upper = text.upper()
-
-        for doc_type, patterns in cls.PATTERNS.items():
+        
+        for doc_type, patterns in self.patterns.items():
             for pattern in patterns:
                 if re.search(pattern, text_upper):
-                    logger.info(f"📄 Wykryto typ dokumentu: {doc_type}")
+                    logger.info(f"Typ dokumentu: {doc_type}")
                     return doc_type, True
-
-        logger.info("📄 Typ dokumentu: nieznany (nie znaleziono oznaczenia)")
-        return 'nieznany', False
-
-
-# ==============================================================================
-# KLASA: RomanianInvoiceParser - Specjalne parsowanie dla rumuńskich faktur
-# ==============================================================================
-
-class RomanianInvoiceParser:
-    """Specjalne parsowanie dla rumuńskich faktur"""
-
-    @classmethod
-    def extract_cif(cls, text: str) -> List[str]:
-        """
-        Ekstraktuje rumuński CIF/CUI z różnych formatów.
-
-        Obsługiwane formaty:
-        - Cod-fiscal: RO246251
-        - CUI: RO12345678
-        - CIF: 12345678
-        - C.I.F.: RO12345678
-        """
-        cif_list = []
-
-        patterns = [
-            # Cod-fiscal: RO246251
-            r'Cod[-\s]?fiscal[:\s]*(?:RO)?\s*(\d{2,10})',
-            # CUI/CIF z prefiksem RO
-            r'(?:CUI|CIF|C\.I\.F\.)[:\s]*RO\s*(\d{2,10})',
-            # CUI/CIF bez prefiksu
-            r'(?:CUI|CIF|C\.I\.F\.)[:\s]*(\d{2,10})',
-            # RO + cyfry (EU VAT)
-            r'\bRO\s*(\d{2,10})\b',
-            # Cod unic de inregistrare
-            r'Cod\s+unic\s+de\s+inregistrare[:\s]*(\d{2,10})',
-        ]
-
-        for pattern in patterns:
-            matches = re.findall(pattern, text, re.IGNORECASE)
-            for match in matches:
-                clean_cif = re.sub(r'\D', '', match)
-                if 2 <= len(clean_cif) <= 10 and clean_cif not in cif_list:
-                    cif_list.append(clean_cif)
-                    logger.info(f"🇷🇴 Znaleziono CIF: {clean_cif}")
-
-        return cif_list
-
-    @classmethod
-    def extract_invoice_series(cls, text: str) -> Tuple[Optional[str], Optional[str]]:
-        """
-        Ekstraktuje serię i numer faktury z rumuńskiego formatu.
-
-        Format: "Factura fiscala seria Dov H nr 00005164"
-        Returns: (seria, numer) np. ("Dov H", "00005164")
-        """
-        # Wzorzec dla pełnego formatu
-        pattern = r'(?:Factura\s+fiscala\s+)?seria\s+([A-Z]{1,5}(?:\s+[A-Z])?)\s+nr\s+(\d{5,10})'
-
-        match = re.search(pattern, text, re.IGNORECASE)
-        if match:
-            series = match.group(1).strip()
-            number = match.group(2).strip()
-            logger.info(f"🇷🇴 Seria: {series}, Numer: {number}")
-            return series, number
-
-        return None, None
+        
+        return self.default, False
 
 
-# ==============================================================================
-# KLASA: BaseParser
-# ==============================================================================
+class DateExtractor:
+    """Ekstrakcja dat na podstawie YAML"""
+    
+    def __init__(self, config: Dict):
+        self.config = config.get('dates', {})
+        self.formats = self.config.get('formats', [])
+        self.issue_config = self.config.get('issue_date', {})
+        self.sale_config = self.config.get('sale_date', {})
+        self.due_config = self.config.get('due_date', {})
+    
+    def extract_all(self, text: str) -> Dict[str, datetime]:
+        """Ekstraktuje wszystkie daty"""
+        all_dates = self._find_all_dates(text)
+        
+        issue_date = self._find_date_by_keywords(
+            text, all_dates,
+            self.issue_config.get('keywords', []),
+            self.issue_config.get('search_range', 150)
+        )
+        
+        sale_date = self._find_date_by_keywords(
+            text, all_dates,
+            self.sale_config.get('keywords', []),
+            self.sale_config.get('search_range', 150)
+        )
+        
+        due_date = self._find_date_by_keywords(
+            text, all_dates,
+            self.due_config.get('keywords', []),
+            self.due_config.get('search_range', 150)
+        )
+        
+        # Fallback
+        if not issue_date and all_dates:
+            issue_date = all_dates[0]['date']
+            logger.warning(f"Data wystawienia - fallback: {issue_date.strftime('%d.%m.%Y')}")
+        
+        if not issue_date:
+            issue_date = datetime.now()
+        
+        if not sale_date:
+            if self.sale_config.get('fallback') == 'use_issue_date':
+                sale_date = issue_date
+            else:
+                sale_date = issue_date
+        
+        if not due_date:
+            fallback_days = self.due_config.get('fallback_days', 14)
+            due_date = issue_date + timedelta(days=fallback_days)
+        
+        # Walidacja logiczna
+        if sale_date > issue_date + timedelta(days=60):
+            sale_date = issue_date
+        
+        if due_date < issue_date:
+            due_date = issue_date + timedelta(days=14)
+        
+        return {
+            'issue': issue_date,
+            'sale': sale_date,
+            'due': due_date
+        }
+    
+    def _find_all_dates(self, text: str) -> List[Dict]:
+        """Znajduje wszystkie daty w tekście"""
+        dates_found = []
+        
+        for fmt_config in self.formats:
+            pattern_str = fmt_config.get('pattern', '')
+            date_format = fmt_config.get('format', '')
+            
+            if not pattern_str or not date_format:
+                continue
+            
+            try:
+                pattern = re.compile(pattern_str)
+                for match in pattern.finditer(text):
+                    date_str = match.group(1) if match.lastindex else match.group(0)
+                    position = match.start()
+                    
+                    try:
+                        normalized = date_str.replace('/', '-').replace('.', '-')
+                        norm_format = date_format.replace('/', '-').replace('.', '-')
+                        parsed = datetime.strptime(normalized, norm_format)
+                        
+                        if datetime(1990, 1, 1) <= parsed <= datetime.now() + timedelta(days=730):
+                            dates_found.append({
+                                'date': parsed,
+                                'position': position,
+                                'raw': date_str
+                            })
+                    except ValueError:
+                        continue
+            except re.error:
+                continue
+        
+        # Usuń duplikaty
+        unique = []
+        for d in dates_found:
+            if not any(d['date'] == u['date'] and abs(d['position'] - u['position']) < 5 for u in unique):
+                unique.append(d)
+        
+        return sorted(unique, key=lambda x: x['position'])
+    
+    def _find_date_by_keywords(self, text: str, all_dates: List[Dict], 
+                                keywords: List[str], search_range: int) -> Optional[datetime]:
+        """Znajduje datę przy słowach kluczowych"""
+        text_upper = text.upper()
+        
+        for keyword in keywords:
+            for match in re.finditer(re.escape(keyword.upper()), text_upper):
+                kw_pos = match.start()
+                
+                # Szukaj dat w pobliżu
+                nearby = [d for d in all_dates if kw_pos <= d['position'] <= kw_pos + search_range]
+                
+                if not nearby:
+                    nearby = [d for d in all_dates if abs(d['position'] - kw_pos) <= search_range]
+                
+                if nearby:
+                    nearby.sort(key=lambda x: abs(x['position'] - kw_pos))
+                    return nearby[0]['date']
+        
+        return None
+
+
+class TaxIdExtractor:
+    """Ekstrakcja NIP/CUI na podstawie YAML"""
+    
+    def __init__(self, config: Dict, language: str):
+        self.config = config.get('tax_id', {})
+        self.patterns = self.config.get('patterns', [])
+        self.validation = self.config.get('validation', {})
+        self.language = language
+    
+    def find_all(self, text: str) -> List[str]:
+        """Znajduje wszystkie identyfikatory podatkowe"""
+        tax_ids = []
+        
+        for pattern_str in self.patterns:
+            try:
+                matches = re.finditer(pattern_str, text, re.IGNORECASE)
+                for match in matches:
+                    raw = match.group(1) if match.lastindex else match.group(0)
+                    clean = re.sub(r'\D', '', raw)
+                    
+                    if self._validate(clean):
+                        if clean not in tax_ids:
+                            tax_ids.append(clean)
+                            logger.debug(f"Znaleziono NIP: {raw} -> {clean}")
+            except re.error:
+                continue
+        
+        return tax_ids
+    
+    def _validate(self, tax_id: str) -> bool:
+        """Waliduje identyfikator podatkowy"""
+        val_type = self.validation.get('type', '')
+        
+        if val_type == 'nip_pl':
+            return len(tax_id) == 10 and ValidationUtils.validate_nip_pl(tax_id)
+        elif val_type == 'cui_ro':
+            return 2 <= len(tax_id) <= 10 and ValidationUtils.validate_cui_ro(tax_id)
+        elif val_type == 'vat_de':
+            return len(tax_id) == 9
+        else:
+            min_len = self.validation.get('min_length', 8)
+            max_len = self.validation.get('max_length', 12)
+            return min_len <= len(tax_id) <= max_len
+
+
+class PartyExtractor:
+    """Ekstrakcja danych stron na podstawie YAML"""
+    
+    def __init__(self, config: Dict):
+        self.config = config.get('parties', {})
+        self.seller_config = self.config.get('seller', {})
+        self.buyer_config = self.config.get('buyer', {})
+    
+    def get_seller_keywords(self) -> List[str]:
+        return self.seller_config.get('keywords', ['SPRZEDAWCA', 'DOSTAWCA'])
+    
+    def get_buyer_keywords(self) -> List[str]:
+        return self.buyer_config.get('keywords', ['NABYWCA', 'KUPUJĄCY'])
+    
+    def get_context_range(self, party: str) -> int:
+        if party == 'seller':
+            return self.seller_config.get('context_range', 300)
+        return self.buyer_config.get('context_range', 300)
+
+
+class AmountExtractor:
+    """Ekstrakcja kwot na podstawie YAML"""
+    
+    def __init__(self, config: Dict, language: str):
+        self.config = config.get('amounts', {})
+        self.decimal_sep = self.config.get('decimal_separator', ',')
+        self.thousand_sep = self.config.get('thousand_separator', ' ')
+        self.gross_config = self.config.get('total_gross', {})
+        self.net_config = self.config.get('total_net', {})
+        self.vat_config = self.config.get('total_vat', {})
+        self.language = language
+    
+    def extract_gross(self, text: str) -> Optional[Decimal]:
+        return self._extract_by_keywords(text, self.gross_config.get('keywords', []))
+    
+    def extract_net(self, text: str) -> Optional[Decimal]:
+        return self._extract_by_keywords(text, self.net_config.get('keywords', []))
+    
+    def extract_vat(self, text: str) -> Optional[Decimal]:
+        return self._extract_by_keywords(text, self.vat_config.get('keywords', []))
+    
+    def get_default_vat_rate(self) -> int:
+        return self.net_config.get('default_vat_rate', 23)
+    
+    def _extract_by_keywords(self, text: str, keywords: List[str]) -> Optional[Decimal]:
+        """Ekstraktuje kwotę przy słowach kluczowych"""
+        text_upper = text.upper()
+        
+        for keyword in keywords:
+            pos = text_upper.find(keyword.upper())
+            if pos != -1:
+                end_pos = min(pos + len(keyword) + 50, len(text))
+                nearby = text[pos + len(keyword):end_pos]
+                nearby = nearby.strip()
+                if nearby.startswith(':'):
+                    nearby = nearby[1:].strip()
+                
+                # Parsuj kwotę
+                amount = MoneyUtils.parse_amount(nearby.split('\n')[0], self.language)
+                if amount:
+                    return amount
+        
+        return None
+
+
+class PaymentExtractor:
+    """Ekstrakcja informacji o płatności na podstawie YAML"""
+    
+    def __init__(self, config: Dict):
+        self.config = config.get('payment', {})
+        self.methods = self.config.get('methods', {})
+        self.statuses = self.config.get('status', {})
+        self.default_method = self.config.get('default_method', 'przelew')
+        self.default_status = self.config.get('default_status', 'nieopłacona')
+    
+    def detect_method(self, text: str) -> str:
+        """Wykrywa metodę płatności"""
+        text_upper = text.upper()
+        
+        for method, cfg in self.methods.items():
+            keywords = cfg.get('keywords', [])
+            for kw in keywords:
+                if kw.upper() in text_upper:
+                    return method
+        
+        return self.default_method
+    
+    def detect_status(self, text: str) -> str:
+        """Wykrywa status płatności"""
+        text_upper = text.upper()
+        
+        for status, cfg in self.statuses.items():
+            keywords = cfg.get('keywords', [])
+            for kw in keywords:
+                if kw.upper() in text_upper:
+                    return status
+        
+        return self.default_status
+
+
+# ============================================
+# BASE PARSER
+# ============================================
 
 class BaseParser:
     """Bazowa klasa parsera"""
-
+    
     def __init__(self, text: str, language: str = 'Polski'):
-        self.text = text
-        # Normalizuj backslashe na slashe
-        self.text = self.text.replace('\\', '/')
+        self.text = text.replace('\\', '/')
         self.lines = [l.strip() for l in self.text.split('\n') if l.strip()]
         self.language = language
         self.lang_config = get_language_config(language)
+        self.yaml_config = YAMLConfigLoader.get_config(language)
         self.errors = []
         self.warnings = []
-
+    
     def parse(self) -> ParsedInvoice:
-        """Główna metoda parsowania - do nadpisania"""
         raise NotImplementedError
-
+    
     def _find_by_keyword(self, keywords: List[str], max_distance: int = 50) -> Optional[str]:
         """Znajdź wartość po słowie kluczowym"""
         text_upper = self.text.upper()
-
+        
         for keyword in keywords:
-            keyword_upper = keyword.upper()
-            pos = text_upper.find(keyword_upper)
-
+            pos = text_upper.find(keyword.upper())
             if pos != -1:
-                # Znajdź wartość w pobliżu
                 end_pos = min(pos + len(keyword) + max_distance, len(self.text))
-                nearby_text = self.text[pos + len(keyword):end_pos]
-
-                # Usuń dwukropek i białe znaki
-                nearby_text = nearby_text.strip()
-                if nearby_text.startswith(':'):
-                    nearby_text = nearby_text[1:].strip()
-
-                # Zwróć pierwszą linię
-                lines = nearby_text.split('\n')
+                nearby = self.text[pos + len(keyword):end_pos].strip()
+                if nearby.startswith(':'):
+                    nearby = nearby[1:].strip()
+                lines = nearby.split('\n')
                 if lines:
                     return lines[0].strip()
-
+        
         return None
-
-    def _find_pattern(self, patterns: List[re.Pattern], multiline: bool = False) -> Optional[str]:
-        """Znajdź wartość używając regex"""
-        search_text = self.text if multiline else ' '.join(self.lines)
-
-        for pattern in patterns:
-            match = pattern.search(search_text)
-            if match:
-                return match.group(1) if len(match.groups()) > 0 else match.group(0)
-
-        return None
-
+    
     def _extract_amount_near_keyword(self, keywords: List[str]) -> Optional[Decimal]:
         """Wyciągnij kwotę w pobliżu słowa kluczowego"""
         for keyword in keywords:
@@ -574,49 +641,56 @@ class BaseParser:
                 amount = MoneyUtils.parse_amount(value, self.language)
                 if amount:
                     return amount
-
         return None
 
 
-# ==============================================================================
-# KLASA: SmartInvoiceParser - Główny parser
-# ==============================================================================
+# ============================================
+# SMART INVOICE PARSER (YAML-DRIVEN)
+# ============================================
 
 class SmartInvoiceParser(BaseParser):
-    """Inteligentny parser z uczeniem maszynowym kontekstu"""
-
+    """Inteligentny parser kierowany konfiguracją YAML"""
+    
     def __init__(self, text: str, language: str = 'Polski', user_tax_id: str = None):
         super().__init__(text, language)
         self.user_tax_id = user_tax_id
-
+        
+        # Inicjalizacja ekstraktorów z YAML
+        self.currency_detector = CurrencyDetector(self.yaml_config)
+        self.invoice_number_extractor = InvoiceNumberExtractor(self.yaml_config)
+        self.invoice_type_detector = InvoiceTypeDetector(self.yaml_config)
+        self.document_type_detector = DocumentTypeDetector(self.yaml_config)
+        self.date_extractor = DateExtractor(self.yaml_config)
+        self.tax_id_extractor = TaxIdExtractor(self.yaml_config, language)
+        self.party_extractor = PartyExtractor(self.yaml_config)
+        self.amount_extractor = AmountExtractor(self.yaml_config, language)
+        self.payment_extractor = PaymentExtractor(self.yaml_config)
+    
     def parse(self) -> ParsedInvoice:
-        """Parsowanie z inteligentną detekcją"""
-
-        # ==== NOWE: Wykryj typ dokumentu (oryginał/kopia) ====
-        document_type, doc_type_found = DocumentTypeDetector.detect(self.text)
-
-        # ==== NOWE: Ulepszone wykrywanie numeru faktury ====
-        invoice_id, invoice_series = InvoiceNumberExtractor.extract(self.text, self.language)
-
+        """Główna metoda parsowania"""
+        
+        # Typ dokumentu
+        document_type, _ = self.document_type_detector.detect(self.text)
+        
+        # Numer faktury
+        invoice_id, invoice_series = self.invoice_number_extractor.extract(self.text)
+        
         # Typ faktury
-        invoice_type = self._detect_invoice_type()
-
+        invoice_type = self.invoice_type_detector.detect(self.text)
+        
         # Daty
-        dates = self._extract_all_dates()
-        issue_date = dates.get('issue', datetime.now())
-        sale_date = dates.get('sale', issue_date)
-        due_date = dates.get('due', issue_date)
-
-        # ==== NOWE: Inteligentne wykrywanie waluty ====
-        currency, currency_confidence = CurrencyDetector.detect_currency(self.text, self.language)
-
-        # Utwórz obiekt z WSZYSTKIMI wymaganymi polami
+        dates = self.date_extractor.extract_all(self.text)
+        
+        # Waluta
+        currency, currency_confidence = self.currency_detector.detect(self.text)
+        
+        # Utwórz obiekt faktury
         invoice = ParsedInvoice(
             invoice_id=invoice_id,
             invoice_type=invoice_type,
-            issue_date=issue_date,
-            sale_date=sale_date,
-            due_date=due_date,
+            issue_date=dates['issue'],
+            sale_date=dates['sale'],
+            due_date=dates['due'],
             supplier_name='Nie znaleziono',
             supplier_tax_id='Brak',
             supplier_address='Nie znaleziono',
@@ -630,262 +704,85 @@ class SmartInvoiceParser(BaseParser):
             document_type=document_type,
             invoice_series=invoice_series
         )
-
-        # Teraz ekstraktuj resztę danych i zaktualizuj obiekt
+        
+        # Ekstraktuj dane stron
         self._extract_parties(invoice)
+        
+        # Ekstraktuj pozycje
         self._extract_items(invoice)
+        
+        # Ekstraktuj podsumowanie
         self._extract_summary(invoice)
+        
+        # Ekstraktuj płatność
         self._extract_payment_info(invoice)
-
-        # Walidacja i oznaczanie
+        
+        # Walidacja
         self._validate_and_mark(invoice)
-
-        # Dodaj ostrzeżenie jeśli waluta ma niską pewność
+        
+        # Ostrzeżenia
         if currency_confidence < 0.5:
             self.warnings.append(f"Niska pewność waluty ({currency}): {currency_confidence:.0%}")
-
-        # Dodaj info o typie dokumentu
-        if doc_type_found:
-            logger.info(f"📄 Dokument oznaczony jako: {document_type.upper()}")
-
+        
         invoice.parsing_errors = self.errors.copy()
         invoice.parsing_warnings = self.warnings.copy()
-
+        
         return invoice
-
-    def _extract_all_dates(self) -> Dict[str, datetime]:
-        """Ekstraktuje daty z faktury - ULEPSZONA WERSJA z kontekstem"""
-
-        # ==== KROK 1: Znajdź wszystkie daty w dokumencie ====
-        all_dates_found = []
-
-        date_patterns = [
-            (r'(\d{2}\.\d{2}\.\d{4})', '%d.%m.%Y'),
-            (r'(\d{2}-\d{2}-\d{4})', '%d-%m-%Y'),
-            (r'(\d{2}/\d{2}/\d{4})', '%d/%m/%Y'),
-            (r'(\d{4}-\d{2}-\d{2})', '%Y-%m-%d'),
-            (r'(\d{4}\.\d{2}\.\d{2})', '%Y.%m.%d'),
-            (r'(\d{1,2}\.\d{1,2}\.\d{4})', '%d.%m.%Y'),
-        ]
-
-        for pattern_str, date_format in date_patterns:
-            pattern = re.compile(pattern_str)
-            matches = pattern.finditer(self.text)
-
-            for match in matches:
-                date_str = match.group(1)
-                position = match.start()
-
-                try:
-                    normalized = date_str.replace('/', '-').replace('.', '-').replace(' ', '-')
-                    parsed_date = datetime.strptime(
-                        normalized, 
-                        date_format.replace('.', '-').replace('/', '-').replace(' ', '-')
-                    )
-
-                    if datetime(1990, 1, 1) <= parsed_date <= datetime.now() + timedelta(days=730):
-                        all_dates_found.append({
-                            'date': parsed_date,
-                            'position': position,
-                            'raw': date_str
-                        })
-                        logger.info(f"📅 Data: {date_str} → {parsed_date.strftime('%d.%m.%Y')} (poz: {position})")
-                except ValueError:
-                    continue
-
-        # Usuń duplikaty
-        unique_dates = []
-        for d in all_dates_found:
-            if not any(d['date'] == u['date'] and abs(d['position'] - u['position']) < 5 for u in unique_dates):
-                unique_dates.append(d)
-
-        all_dates_found = sorted(unique_dates, key=lambda x: x['position'])
-        logger.info(f"📊 Znaleziono {len(all_dates_found)} dat")
-
-        # ==== KROK 2: Słowa kluczowe dla typów dat ====
-        issue_keywords = [
-            'DATA WYSTAWIENIA', 'DATA WYSTAWIENIA:', 'WYSTAWIENIA',
-            'INVOICE DATE', 'ISSUE DATE', 'DATE OF ISSUE',
-            'RECHNUNGSDATUM', 'AUSSTELLUNGSDATUM',
-            'DATA EMITERII'
-        ]
-
-        sale_keywords = [
-            'DATA SPRZEDAŻY', 'DATA SPRZEDAZY', 'DATA SPRZEDAŻY:', 
-            'DATA DOSTAWY', 'DATA WYKONANIA', 'DOSTAWY/WYKONANIA USŁUGI',
-            'DATĂ DOSTAWY', 'DAȚA DOSTAWY',
-            'SALE DATE', 'DELIVERY DATE', 'SERVICE DATE',
-            'LIEFERDATUM', 'LEISTUNGSDATUM'
-        ]
-
-        due_keywords = [
-            'TERMIN PŁATNOŚCI', 'TERMIN PLATNOŚCI', 'TERMIN PŁATNOŚCI:',
-            'DO DNIA', 'PŁATNE DO', 'ZAPŁATA DO',
-            'DUE DATE', 'PAYMENT DUE', 'PAY BY',
-            'ZAHLBAR BIS', 'FÄLLIGKEITSDATUM',
-            'TERMEN DE PLATĂ', 'SCADENȚĂ'
-        ]
-
-        # ==== KROK 3: Szukaj dat przy frazach ====
-        def find_date_near_keywords(keywords: list, search_range: int = 150) -> Optional[datetime]:
-            for keyword in keywords:
-                keyword_upper = keyword.upper()
-
-                for match in re.finditer(re.escape(keyword_upper), self.text.upper()):
-                    keyword_pos = match.start()
-
-                    nearby_dates = [
-                        d for d in all_dates_found
-                        if keyword_pos <= d['position'] <= keyword_pos + search_range
-                    ]
-
-                    if not nearby_dates:
-                        nearby_dates = [
-                            d for d in all_dates_found
-                            if abs(d['position'] - keyword_pos) <= search_range
-                        ]
-
-                    if nearby_dates:
-                        nearby_dates.sort(key=lambda x: abs(x['position'] - keyword_pos))
-                        found = nearby_dates[0]
-                        logger.info(f"✅ '{keyword}' → {found['raw']} (odl: {abs(found['position'] - keyword_pos)})")
-                        return found['date']
-
-            return None
-
-        issue_date = find_date_near_keywords(issue_keywords)
-        sale_date = find_date_near_keywords(sale_keywords)
-        due_date = find_date_near_keywords(due_keywords)
-
-        # ==== KROK 4: Fallback logika ====
-        if not issue_date and all_dates_found:
-            issue_date = all_dates_found[0]['date']
-            logger.warning(f"⚠️ Data wystawienia - fallback: {issue_date.strftime('%d.%m.%Y')}")
-
-        if not sale_date:
-            sale_date = issue_date if issue_date else datetime.now()
-            logger.warning(f"⚠️ Data sprzedaży = data wystawienia: {sale_date.strftime('%d.%m.%Y')}")
-
-        if not due_date:
-            base = issue_date if issue_date else datetime.now()
-            due_date = base + timedelta(days=14)
-            logger.warning(f"⚠️ Termin płatności +14 dni: {due_date.strftime('%d.%m.%Y')}")
-
-        # ==== KROK 5: Walidacja logiczna ====
-        if not issue_date:
-            issue_date = datetime.now()
-
-        if sale_date and issue_date and sale_date > issue_date + timedelta(days=60):
-            logger.warning(f"⚠️ Data sprzedaży podejrzanie późna - korekta")
-            sale_date = issue_date
-
-        if due_date and issue_date and due_date < issue_date:
-            logger.warning(f"⚠️ Termin przed wystawieniem - korekta")
-            due_date = issue_date + timedelta(days=14)
-
-        result = {
-            'issue': issue_date,
-            'sale': sale_date,
-            'due': due_date
-        }
-
-        logger.info(f"📅 FINALNE DATY:")
-        logger.info(f"   Wystawienia: {result['issue'].strftime('%d.%m.%Y')}")
-        logger.info(f"   Sprzedaży:   {result['sale'].strftime('%d.%m.%Y')}")
-        logger.info(f"   Płatności:   {result['due'].strftime('%d.%m.%Y')}")
-
-        return result
-
-    def _extract_invoice_number(self) -> str:
-        """DEPRECATED: Użyj InvoiceNumberExtractor.extract()"""
-        invoice_id, _ = InvoiceNumberExtractor.extract(self.text, self.language)
-        return invoice_id
-
-    def _detect_invoice_type(self) -> str:
-        """Wykrywa typ faktury"""
-        text_upper = self.text.upper()
-
-        if 'KOREKTA' in text_upper or 'CORRECTION' in text_upper:
-            return 'KOREKTA'
-        elif 'PROFORMA' in text_upper:
-            return 'PROFORMA'
-        elif 'ZALICZK' in text_upper:
-            return 'ZALICZKOWA'
-        elif 'KOŃCOWA' in text_upper or 'FINAL' in text_upper:
-            return 'KOŃCOWA'
-        else:
-            return 'VAT'
-
+    
     def _extract_parties(self, invoice: ParsedInvoice):
-        """Ekstraktuje dane stron transakcji - ULEPSZONA LOGIKA"""
-        # Znajdź wszystkie NIPy/CUI
-        tax_ids = self._find_all_tax_ids()
-
-        logger.info(f"🔎 Znalezione NIP-y: {tax_ids}")
-
-        # Znajdź pozycje słów kluczowych w tekście
-        seller_keywords = self.lang_config.keywords.get('seller', ['SPRZEDAWCA', 'DOSTAWCA'])
-        buyer_keywords = self.lang_config.keywords.get('buyer', ['NABYWCA', 'KUPUJĄCY'])
-
+        """Ekstraktuje dane stron transakcji"""
+        tax_ids = self.tax_id_extractor.find_all(self.text)
+        logger.info(f"Znalezione NIP-y: {tax_ids}")
+        
+        seller_keywords = self.party_extractor.get_seller_keywords()
+        buyer_keywords = self.party_extractor.get_buyer_keywords()
+        
         seller_pos = self._find_keyword_position(seller_keywords)
         buyer_pos = self._find_keyword_position(buyer_keywords)
-
-        logger.info(f"📍 Pozycje słów kluczowych: SPRZEDAWCA={seller_pos}, NABYWCA={buyer_pos}")
-
-        # ==== ULEPSZONA LOGIKA PRZYPISYWANIA ====
+        
+        logger.debug(f"Pozycje: SPRZEDAWCA={seller_pos}, NABYWCA={buyer_pos}")
+        
+        # Przypisz NIP-y na podstawie odległości
         supplier_tax = None
         buyer_tax = None
-
+        
         user_nip_clean = None
         if self.user_tax_id:
             user_nip_clean = re.sub(r'\D', '', self.user_tax_id)
-            logger.info(f"👤 Mój NIP: {user_nip_clean}")
-
+        
         nip_distances = []
-
         for tax_id in tax_ids:
             positions = [m.start() for m in re.finditer(re.escape(tax_id), self.text)]
-
             for pos in positions:
-                dist_to_seller = abs(pos - seller_pos) if seller_pos != -1 else 9999
-                dist_to_buyer = abs(pos - buyer_pos) if buyer_pos != -1 else 9999
-
+                dist_seller = abs(pos - seller_pos) if seller_pos != -1 else 9999
+                dist_buyer = abs(pos - buyer_pos) if buyer_pos != -1 else 9999
                 nip_distances.append({
                     'nip': tax_id,
                     'position': pos,
-                    'dist_seller': dist_to_seller,
-                    'dist_buyer': dist_to_buyer,
-                    'closer_to': 'seller' if dist_to_seller < dist_to_buyer else 'buyer'
+                    'dist_seller': dist_seller,
+                    'dist_buyer': dist_buyer,
+                    'closer_to': 'seller' if dist_seller < dist_buyer else 'buyer'
                 })
-
-        for item in nip_distances:
-            logger.info(f"  NIP {item['nip']}: pos={item['position']}, "
-                       f"do_sprzedawcy={item['dist_seller']}, "
-                       f"do_nabywcy={item['dist_buyer']}, "
-                       f"bliżej: {item['closer_to']}")
-
+        
         if nip_distances:
             seller_candidates = [x for x in nip_distances if x['closer_to'] == 'seller']
             if seller_candidates:
                 seller_candidates.sort(key=lambda x: x['dist_seller'])
                 supplier_tax = seller_candidates[0]['nip']
-
+            
             buyer_candidates = [x for x in nip_distances if x['closer_to'] == 'buyer']
             if buyer_candidates:
                 buyer_candidates.sort(key=lambda x: x['dist_buyer'])
                 buyer_tax = buyer_candidates[0]['nip']
-
+        
         if not supplier_tax and tax_ids:
-            supplier_tax = tax_ids[0] if len(tax_ids) > 0 else None
-
+            supplier_tax = tax_ids[0]
         if not buyer_tax and tax_ids:
             buyer_tax = tax_ids[1] if len(tax_ids) > 1 else tax_ids[0]
-
+        
+        # Override jeśli znamy NIP użytkownika
         if user_nip_clean and user_nip_clean in tax_ids:
-            logger.info(f"✅ Znaleziono mój NIP w dokumencie!")
-
             user_distances = [x for x in nip_distances if x['nip'] == user_nip_clean]
-
             if user_distances:
                 if user_distances[0]['closer_to'] == 'buyer':
                     buyer_tax = user_nip_clean
@@ -893,103 +790,43 @@ class SmartInvoiceParser(BaseParser):
                     others = [x for x in tax_ids if x != user_nip_clean]
                     if others:
                         supplier_tax = others[0]
-                    logger.info("👤 Jestem NABYWCĄ")
                 else:
                     supplier_tax = user_nip_clean
                     invoice.belongs_to_user = False
                     others = [x for x in tax_ids if x != user_nip_clean]
                     if others:
                         buyer_tax = others[0]
-                    logger.info("🏢 Jestem SPRZEDAWCĄ")
-
+        
         invoice.supplier_tax_id = supplier_tax or 'Nie znaleziono'
         invoice.buyer_tax_id = buyer_tax or 'Nie znaleziono'
-
-        logger.info(f"✅ PRZYPISANE - Dostawca NIP: {invoice.supplier_tax_id}, Nabywca NIP: {invoice.buyer_tax_id}")
-
-        invoice.supplier_name = self._extract_company_name_near_keyword(seller_keywords)
-        invoice.buyer_name = self._extract_company_name_near_keyword(buyer_keywords)
-
+        
+        logger.info(f"Dostawca NIP: {invoice.supplier_tax_id}, Nabywca NIP: {invoice.buyer_tax_id}")
+        
+        # Nazwy firm
+        invoice.supplier_name = self._extract_company_name(seller_keywords)
+        invoice.buyer_name = self._extract_company_name(buyer_keywords)
+        
+        # Adresy
         invoice.supplier_address = self._extract_address_near_tax_id(supplier_tax) or 'Nie znaleziono'
         invoice.buyer_address = self._extract_address_near_tax_id(buyer_tax) or 'Nie znaleziono'
-
+        
+        # Konta bankowe
         invoice.supplier_accounts = BankAccountUtils.extract_bank_accounts(self.text)
-
-    def _find_all_tax_ids(self) -> List[str]:
-        """Znajduje wszystkie numery identyfikacji podatkowej - ULEPSZONA WERSJA"""
-        tax_ids = []
-
-        # ==== SPECJALNE PARSOWANIE DLA RUMUŃSKICH FAKTUR ====
-        if self.language == 'Rumuński':
-            romanian_cifs = RomanianInvoiceParser.extract_cif(self.text)
-            tax_ids.extend(romanian_cifs)
-
-        # ==== STANDARDOWE PATTERNY ====
-        patterns = [
-            r'NIP[:\.\s-]*(\d{3}[-\s]\d{3}[-\s]\d{2}[-\s]\d{2})',
-            r'NIP[:\.\s-]*(\d{3}[-\s]\d{2}[-\s]\d{2}[-\s]\d{3})',
-            r'NIP[:\.\s-]*(\d{3}\.\d{3}\.\d{2}\.\d{2})',
-            r'NIP[:\.\s-]*(\d{3}\s\d{3}\s\d{2}\s\d{2})',
-            r'NIP[:\.\s-]*(\d{10})',
-            r'(?:PL[-\s]?)(\d{10})',
-            r'(?<!\d)(\d{3}[-\s]\d{3}[-\s]\d{2}[-\s]\d{2})(?!\d)',
-            r'(?<!\d)(\d{10})(?!\d)'
-        ]
-
-        found_raw = []
-
-        for pattern in patterns:
-            matches = re.finditer(pattern, self.text, re.IGNORECASE)
-            for match in matches:
-                raw_nip = match.group(1) if match.lastindex else match.group(0)
-                clean = re.sub(r'\D', '', raw_nip)
-                position = match.start()
-
-                is_valid = False
-
-                if self.language == 'Polski':
-                    if len(clean) == 10:
-                        is_valid = ValidationUtils.validate_nip_pl(clean)
-                elif self.language == 'Rumuński':
-                    if 2 <= len(clean) <= 10:
-                        is_valid = ValidationUtils.validate_cui_ro(clean)
-                else:
-                    if 8 <= len(clean) <= 12:
-                        is_valid = True
-
-                if is_valid and clean not in [x[1] for x in found_raw]:
-                    found_raw.append((raw_nip, clean, position))
-                    logger.info(f"🔍 Znaleziono NIP: {raw_nip} → {clean} (pozycja: {position})")
-
-        unique_nips = list(dict.fromkeys([x[1] for x in found_raw]))
-
-        # Dodaj CIF-y które nie są jeszcze na liście
-        for cif in tax_ids:
-            if cif not in unique_nips:
-                unique_nips.append(cif)
-
-        logger.info(f"📊 Suma unikalnych NIP-ów: {len(unique_nips)} → {unique_nips}")
-
-        return unique_nips
-
+    
     def _find_keyword_position(self, keywords: List[str]) -> int:
-        """Znajduje pozycję pierwszego słowa kluczowego"""
+        """Znajduje pozycję słowa kluczowego"""
         text_upper = self.text.upper()
         min_pos = -1
-
         for keyword in keywords:
             pos = text_upper.find(keyword.upper())
-            if pos != -1:
-                if min_pos == -1 or pos < min_pos:
-                    min_pos = pos
-
+            if pos != -1 and (min_pos == -1 or pos < min_pos):
+                min_pos = pos
         return min_pos
-
-    def _extract_company_name_near_keyword(self, keywords: List[str]) -> str:
-        """Ekstraktuje nazwę firmy w pobliżu słowa kluczowego"""
+    
+    def _extract_company_name(self, keywords: List[str]) -> str:
+        """Ekstraktuje nazwę firmy"""
         for i, line in enumerate(self.lines):
             line_upper = line.upper()
-
             for keyword in keywords:
                 if keyword.upper() in line_upper:
                     parts = line.split(':')
@@ -997,122 +834,118 @@ class SmartInvoiceParser(BaseParser):
                         name = parts[1].strip()
                         if len(name) > 3:
                             return name
-
                     if i + 1 < len(self.lines):
                         next_line = self.lines[i + 1].strip()
                         if (not re.search(r'\d{2}-\d{3}', next_line) and
                             not re.search(r'NIP|CUI|VAT', next_line, re.I) and
                             len(next_line) > 3):
                             return next_line
-
         return 'Nie znaleziono'
-
+    
     def _extract_address_near_tax_id(self, tax_id: str) -> Optional[str]:
         """Ekstraktuje adres w pobliżu NIP"""
         if not tax_id or tax_id == 'Nie znaleziono':
             return None
-
+        
         tax_pos = self.text.find(tax_id)
         if tax_pos == -1:
             return None
-
-        nearby_text = self.text[max(0, tax_pos - 200):min(len(self.text), tax_pos + 200)]
-
-        patterns = [
-            r'(\d{2}-\d{3}\s+[A-ZĄŻŹĆŃŁÓĘŚ][a-zążźćńłóęś]+(?:\s+[A-ZĄŻŹĆŃŁÓĘŚ][a-zążźćńłóęś]+)*)',
-            r'([A-Z][a-z]+\s+\d{5})',
-            r'(\d{4}\s+[A-Z][a-z]+)',
-        ]
-
+        
+        nearby = self.text[max(0, tax_pos - 200):min(len(self.text), tax_pos + 200)]
+        
+        address_config = self.yaml_config.get('address', {})
+        patterns = address_config.get('patterns', [])
+        
         for pattern in patterns:
-            match = re.search(pattern, nearby_text, re.I)
+            match = re.search(pattern, nearby, re.I)
             if match:
                 return match.group(1)
-
+        
         return None
-
+    
     def _extract_items(self, invoice: ParsedInvoice):
         """Ekstraktuje pozycje faktury"""
         items = []
-
+        
         table_section = self._find_table_section()
         if table_section:
             items = self._parse_table_section(table_section)
-
+        
         if not items:
             items = self._smart_item_detection()
-
+        
         invoice.line_items = items
-
+        
         if items and invoice.total_gross == 0:
             total = sum(Decimal(str(item.get('total', 0))) for item in items)
             invoice.total_gross = total
-            invoice.total_net = total / Decimal('1.23')
+            vat_rate = self.amount_extractor.get_default_vat_rate()
+            invoice.total_net = total / Decimal(str(1 + vat_rate / 100))
             invoice.total_vat = total - invoice.total_net
-
+    
     def _find_table_section(self) -> Optional[str]:
-        """Znajduje sekcję z tabelą pozycji"""
-        table_keywords = ['LP', 'NAZWA', 'ILOŚĆ', 'CENA', 'WARTOŚĆ', 'DESCRIPTION', 'QTY', 'PRICE']
-
+        """Znajduje sekcję z tabelą"""
+        line_items_config = self.yaml_config.get('line_items', {})
+        start_keywords = line_items_config.get('table_start', {}).get('keywords', [])
+        end_keywords = line_items_config.get('table_end', {}).get('keywords', [])
+        
         start_idx = -1
         end_idx = -1
-
+        
         for i, line in enumerate(self.lines):
             line_upper = line.upper()
-
-            if sum(1 for kw in table_keywords if kw in line_upper) >= 2:
+            
+            if sum(1 for kw in start_keywords if kw.upper() in line_upper) >= 2:
                 start_idx = i + 1
-
-            if start_idx != -1 and any(kw in line_upper for kw in ['SUMA', 'RAZEM', 'TOTAL']):
+            
+            if start_idx != -1 and any(kw.upper() in line_upper for kw in end_keywords):
                 end_idx = i
                 break
-
+        
         if start_idx != -1:
             if end_idx == -1:
                 end_idx = len(self.lines)
             return '\n'.join(self.lines[start_idx:end_idx])
-
+        
         return None
-
+    
     def _parse_table_section(self, section: str) -> List[Dict]:
         """Parsuje sekcję tabeli"""
         items = []
-        lines = section.split('\n')
-
-        for line in lines:
+        
+        for line in section.split('\n'):
             if not line.strip():
                 continue
-
+            
             numbers = TextUtils.extract_numbers(line)
-
             if numbers:
                 item = {
                     'description': re.sub(r'[\d\.,]+', '', line).strip(),
                     'quantity': int(numbers[0]) if numbers[0] < 1000 else 1,
                     'unit_price': 0,
-                    'total': numbers[-1] if len(numbers) > 0 else 0
+                    'total': numbers[-1] if numbers else 0
                 }
-
                 if item['quantity'] > 0:
                     item['unit_price'] = item['total'] / item['quantity']
-
                 if item['description'] and item['total'] > 0:
                     items.append(item)
-
+        
         return items
-
+    
     def _smart_item_detection(self) -> List[Dict]:
         """Inteligentna detekcja pozycji"""
         items = []
         current_item = {}
         collecting_numbers = []
-
+        
+        line_items_config = self.yaml_config.get('line_items', {})
+        end_keywords = line_items_config.get('table_end', {}).get('keywords', [])
+        
         for line in self.lines:
-            if any(kw in line.upper() for kw in ['SUMA', 'RAZEM', 'TOTAL', 'DO ZAPŁATY']):
+            if any(kw.upper() in line.upper() for kw in end_keywords):
                 break
-
+            
             numbers = TextUtils.extract_numbers(line)
-
             if numbers:
                 collecting_numbers.extend(numbers)
             else:
@@ -1123,65 +956,55 @@ class SmartInvoiceParser(BaseParser):
                         current_item['quantity'] = 1
                         current_item['unit_price'] = current_item['total']
                         items.append(current_item)
-
                     current_item = {'description': clean_line}
                     collecting_numbers = []
-
+        
         if current_item and collecting_numbers:
             current_item['total'] = max(collecting_numbers)
             current_item['quantity'] = 1
             current_item['unit_price'] = current_item['total']
             items.append(current_item)
-
+        
         return items
-
+    
     def _extract_summary(self, invoice: ParsedInvoice):
         """Ekstraktuje podsumowanie finansowe"""
-        keywords_gross = ['DO ZAPŁATY', 'RAZEM', 'TOTAL', 'SUMA', 'BRUTTO']
-        keywords_net = ['NETTO', 'NET', 'PODSTAWA']
-        keywords_vat = ['VAT', 'TAX', 'PODATEK']
-
-        gross = self._extract_amount_near_keyword(keywords_gross)
-        net = self._extract_amount_near_keyword(keywords_net)
-        vat = self._extract_amount_near_keyword(keywords_vat)
-
+        gross = self.amount_extractor.extract_gross(self.text)
+        net = self.amount_extractor.extract_net(self.text)
+        vat = self.amount_extractor.extract_vat(self.text)
+        
+        # Obliczenia fallback
         if gross and not net and not vat:
-            net = gross / Decimal('1.23')
+            vat_rate = self.amount_extractor.get_default_vat_rate()
+            net = gross / Decimal(str(1 + vat_rate / 100))
             vat = gross - net
         elif net and vat and not gross:
             gross = net + vat
         elif gross and net and not vat:
             vat = gross - net
-
+        
         invoice.total_gross = gross or Decimal('0')
         invoice.total_net = net or Decimal('0')
         invoice.total_vat = vat or Decimal('0')
-
-        # UWAGA: Waluta jest już ustawiona przez CurrencyDetector w metodzie parse()
-        # Nie nadpisujemy jej tutaj prostym regex-em
-
+    
     def _extract_payment_info(self, invoice: ParsedInvoice):
         """Ekstraktuje informacje o płatności"""
-        if re.search(r'PRZELEW|TRANSFER|PRZELEWEM', self.text, re.I):
-            invoice.payment_method = 'przelew'
-        elif re.search(r'GOTÓWK|CASH|HOTOVOST', self.text, re.I):
-            invoice.payment_method = 'gotówka'
-        elif re.search(r'KART|CARD', self.text, re.I):
-            invoice.payment_method = 'karta'
-
-        if re.search(r'ZAPŁACON|OPŁACON|PAID|SETTLED', self.text, re.I):
-            invoice.payment_status = 'opłacona'
+        invoice.payment_method = self.payment_extractor.detect_method(self.text)
+        invoice.payment_status = self.payment_extractor.detect_status(self.text)
+        
+        if invoice.payment_status == 'opłacona':
             invoice.paid_amount = invoice.total_gross
-        elif re.search(r'ZALICZK|ADVANCE|DEPOSIT', self.text, re.I):
-            invoice.payment_status = 'częściowo opłacona'
-            advance_amount = self._extract_amount_near_keyword(['ZALICZKA', 'ADVANCE'])
-            if advance_amount:
-                invoice.paid_amount = advance_amount
-
+        elif invoice.payment_status == 'częściowo_opłacona':
+            # Szukaj kwoty zaliczki
+            advance_keywords = ['ZALICZKA', 'ADVANCE', 'AVANS', 'ANZAHLUNG']
+            advance = self._extract_amount_near_keyword(advance_keywords)
+            if advance:
+                invoice.paid_amount = advance
+    
     def _validate_and_mark(self, invoice: ParsedInvoice):
-        """Walidacja i oznaczanie faktur"""
+        """Walidacja faktury"""
         validator = InvoiceValidator(self.language)
-
+        
         invoice_dict = {
             'invoice_id': invoice.invoice_id,
             'supplier': {
@@ -1208,11 +1031,11 @@ class SmartInvoiceParser(BaseParser):
                 'total_gross': float(invoice.total_gross)
             }
         }
-
-        validation_result = validator.validate(invoice_dict)
-
-        invoice.confidence = validation_result.confidence
-        invoice.is_verified = validation_result.is_valid
-
-        self.errors.extend(validation_result.errors)
-        self.warnings.extend(validation_result.warnings)
+        
+        result = validator.validate(invoice_dict)
+        
+        invoice.confidence = result.confidence
+        invoice.is_verified = result.is_valid
+        
+        self.errors.extend(result.errors)
+        self.warnings.extend(result.warnings)

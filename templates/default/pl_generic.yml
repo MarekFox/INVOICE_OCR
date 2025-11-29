@@ -2,8 +2,12 @@
 issuer: "Szablon Ogólny Polski"
 description: "Domyślny szablon dla faktur w języku polskim"
 language: "Polski"
+language_code: "pl"
 priority: 1
 
+# ============================================
+# SŁOWA KLUCZOWE DO IDENTYFIKACJI DOKUMENTU
+# ============================================
 keywords:
   - "FAKTURA"
   - "FAKTURA VAT"
@@ -13,225 +17,328 @@ keywords:
 
 exclude_keywords: []
 
-fields:
-  invoice_id:
-    parser: regex
-    patterns:
-      - 'Faktura\s+(?:VAT\s+)?(?:nr\.?|Nr\.?)?\s*([A-Z0-9][A-Z0-9/\-\._]+)'
-      - 'FV[/-]?(\d+/\d+/\d{4})'
-      - 'Nr\s*faktury[:\s]+([A-Z0-9/\-\.]+)'
-      - '([0-9]{1,10}/[0-9]{1,2}/[0-9]{4})'
-    group: 1
-    required: true
+# ============================================
+# KONFIGURACJA WALUTY
+# ============================================
+currency:
+  default: "PLN"
+  patterns:
+    PLN:
+      codes: ["PLN"]
+      symbols: ["zł", "złotych", "złoty", "złote", "zlotych", "zloty", "ZŁ"]
+      weight: 1.0
+    EUR:
+      codes: ["EUR"]
+      symbols: ["€", "euro", "EURO"]
+      weight: 0.8
+    USD:
+      codes: ["USD"]
+      symbols: ["$", "dolar", "dolarów"]
+      weight: 0.8
+  # Wzorce do ignorowania przy wykrywaniu waluty (IBAN, VAT ID, itp.)
+  ignore_patterns:
+    - '[A-Z]{2}\d{2}[\s]?[A-Z0-9]{4}[\s]?[\d]{4}[\s]?[\d]{4}[\s]?[\d]{4}[\s]?[\d]{4}'
+    - '[A-Z]{2}\d{2}\s?\d{4}\s?\d{4}\s?\d{4}\s?\d{4}\s?\d{4}'
+    - '\d{2}[\s]?\d{4}[\s]?\d{4}[\s]?\d{4}[\s]?\d{4}[\s]?\d{4}[\s]?\d{4}'
+    - '(?:PL|RO|DE|FR|IT|ES|NL|BE|AT|CZ|SK|HU)\s?\d{8,12}'
+    - '(?:NIP|VAT|CUI|CIF)[:\s]*(?:PL|RO|DE)?[\s-]?\d{8,12}'
 
-  invoice_type:
-    parser: keyword_detection
-    mapping:
-      "KOREKTA": "KOREKTA"
-      "CORRECTION": "KOREKTA"
-      "PROFORMA": "PROFORMA"
-      "ZALICZKOWA": "ZALICZKOWA"
-      "KOŃCOWA": "KOŃCOWA"
-    default: "VAT"
+# ============================================
+# KONFIGURACJA NUMERU FAKTURY
+# ============================================
+invoice_number:
+  # Frazy poprzedzające numer faktury
+  prefixes:
+    - 'Faktura\s+VAT[_\s-]*(?:nr|numer)?[:\s]*'
+    - 'Faktura[_\s-]*(?:nr|numer)?[:\s]*'
+    - 'FV[_\s-]*(?:nr)?[:\s]*'
+    - 'F[_\s-]*(?:nr)?[:\s]*'
+    - 'Nr\s+faktury[:\s]*'
+    - 'Numer\s+faktury[:\s]*'
+    - 'Dokument[:\s]*'
+  # Wzorce numerów
+  patterns:
+    - '([A-Z]{1,4}[/\\-]\d{1,6}(?:[/\\-]\d{1,4}){0,2})'
+    - '(\d{1,6}[/\\-]\d{2,4}(?:[/\\-]\d{1,4})?)'
+    - '([A-Z]{1,4}[-_]\d{1,6}[-_]\d{2,4})'
+    - '(\d{4}[/\\-][A-Z]{1,4}[/\\-]\d{1,6})'
+    - '(\d{6,15}[A-Z]{1,4})'
+    - '(\d{8,15})'
+    - '([A-Z]{2,5}\d{5,10})'
+  # Słowa kluczowe w linii
+  line_keywords:
+    - "FAKTURA"
+    - "INVOICE"
 
+# ============================================
+# KONFIGURACJA TYPU FAKTURY
+# ============================================
+invoice_type:
+  default: "VAT"
+  mapping:
+    KOREKTA:
+      keywords: ["KOREKTA", "KORYGUJĄCA", "CORRECTION"]
+    PROFORMA:
+      keywords: ["PROFORMA", "PRO FORMA", "PRO-FORMA"]
+    ZALICZKOWA:
+      keywords: ["ZALICZKOWA", "ZALICZKA", "ADVANCE"]
+    KOŃCOWA:
+      keywords: ["KOŃCOWA", "FINAL", "FINALNA"]
+    DUPLIKAT:
+      keywords: ["DUPLIKAT", "DUPLICATE"]
+
+# ============================================
+# KONFIGURACJA TYPU DOKUMENTU (ORYGINAŁ/KOPIA)
+# ============================================
+document_type:
+  default: "nieznany"
+  patterns:
+    oryginał:
+      - '\bORYGINAŁ\b'
+      - '\bORYGINAL\b'
+      - '\bORIGINAL\b'
+    kopia:
+      - '\bKOPIA\b'
+      - '\bCOPY\b'
+    duplikat:
+      - '\bDUPLIKAT\b'
+      - '\bDUPLICATE\b'
+
+# ============================================
+# KONFIGURACJA DAT
+# ============================================
+dates:
+  formats:
+    - pattern: '\d{2}\.\d{2}\.\d{4}'
+      format: '%d.%m.%Y'
+    - pattern: '\d{2}-\d{2}-\d{4}'
+      format: '%d-%m-%Y'
+    - pattern: '\d{2}/\d{2}/\d{4}'
+      format: '%d/%m/%Y'
+    - pattern: '\d{4}-\d{2}-\d{2}'
+      format: '%Y-%m-%d'
+    - pattern: '\d{4}\.\d{2}\.\d{2}'
+      format: '%Y.%m.%d'
+    - pattern: '\d{1,2}\.\d{1,2}\.\d{4}'
+      format: '%d.%m.%Y'
+  
   issue_date:
-    parser: date
     keywords:
       - "DATA WYSTAWIENIA"
       - "Data wystawienia"
       - "WYSTAWIENIA"
-    patterns:
-      - '\d{2}\.\d{2}\.\d{4}'
-      - '\d{2}-\d{2}-\d{4}'
-      - '\d{4}-\d{2}-\d{2}'
-    formats:
-      - '%d.%m.%Y'
-      - '%d-%m-%Y'
-      - '%Y-%m-%d'
+      - "Wystawiono"
+      - "Wystawiono dnia"
     search_range: 150
     required: true
-
+  
   sale_date:
-    parser: date
     keywords:
       - "DATA SPRZEDAŻY"
       - "Data sprzedaży"
       - "DATA DOSTAWY"
+      - "Data dostawy"
+      - "DATA WYKONANIA"
       - "Dostawy/wykonania usługi"
-    patterns:
-      - '\d{2}\.\d{2}\.\d{4}'
-    formats:
-      - '%d.%m.%Y'
+      - "SPRZEDAŻY"
+    search_range: 150
     fallback: "use_issue_date"
-
+  
   due_date:
-    parser: date
     keywords:
       - "TERMIN PŁATNOŚCI"
       - "Termin płatności"
       - "PŁATNE DO"
+      - "Płatne do"
       - "DO DNIA"
-    patterns:
-      - '\d{2}\.\d{2}\.\d{4}'
-    formats:
-      - '%d.%m.%Y'
-    fallback: "add_days:14"
+      - "ZAPŁATA DO"
+      - "Termin zapłaty"
+    search_range: 150
+    fallback_days: 14
 
-  supplier_name:
-    parser: context_extraction
+# ============================================
+# KONFIGURACJA NIP/IDENTYFIKATORÓW PODATKOWYCH
+# ============================================
+tax_id:
+  name: "NIP"
+  patterns:
+    - 'NIP[:\.\s-]*(\d{3}[-\s]\d{3}[-\s]\d{2}[-\s]\d{2})'
+    - 'NIP[:\.\s-]*(\d{3}[-\s]\d{2}[-\s]\d{2}[-\s]\d{3})'
+    - 'NIP[:\.\s-]*(\d{3}\.\d{3}\.\d{2}\.\d{2})'
+    - 'NIP[:\.\s-]*(\d{3}\s\d{3}\s\d{2}\s\d{2})'
+    - 'NIP[:\.\s-]*(\d{10})'
+    - '(?:PL[-\s]?)(\d{10})'
+    - '(?<!\d)(\d{3}[-\s]\d{3}[-\s]\d{2}[-\s]\d{2})(?!\d)'
+    - '(?<!\d)(\d{10})(?!\d)'
+  validation:
+    type: "nip_pl"
+    length: 10
+  prefix: "PL"
+
+# ============================================
+# KONFIGURACJA STRON (SPRZEDAWCA/NABYWCA)
+# ============================================
+parties:
+  seller:
     keywords:
       - "SPRZEDAWCA"
       - "SPRZEDAJĄCY"
       - "DOSTAWCA"
       - "WYSTAWCA"
-    extraction_strategy: "next_line"
-    fallback: "NOT_FOUND"
-    required: true
-
-  supplier_tax_id:
-    parser: regex
-    patterns:
-      - 'NIP[:\.\s-]*(\d{3}[-\s]\d{3}[-\s]\d{2}[-\s]\d{2})'
-      - 'NIP[:\.\s-]*(\d{10})'
-      - '(?:PL[-\s]?)(\d{10})'
-    validator: nip
-    group: 1
-    context_keywords:
-      - "SPRZEDAWCA"
-      - "DOSTAWCA"
+      - "Sprzedawca"
+      - "Dostawca"
     context_range: 300
-    required: true
-
-  supplier_address:
-    parser: address_extraction
-    context_keywords:
-      - "SPRZEDAWCA"
-    patterns:
-      - '(\d{2}-\d{3}\s+[A-ZĄŻŹĆŃŁÓĘŚ][a-zążźćńłóęś]+(?:\s+[A-ZĄŻŹĆŃŁÓĘŚ][a-zążźćńłóęś]+)*)'
-    context_range: 400
-
-  supplier_accounts:
-    parser: bank_accounts
-    patterns:
-      - '(?:PL\s?)?\d{2}\s?\d{4}\s?\d{4}\s?\d{4}\s?\d{4}\s?\d{4}\s?\d{4}'
-      - '(?<!\d)\d{26}(?!\d)'
-    validator: iban
-    multiple: true
-
-  buyer_name:
-    parser: context_extraction
+  
+  buyer:
     keywords:
       - "NABYWCA"
       - "KUPUJĄCY"
       - "ODBIORCA"
-    extraction_strategy: "next_line"
-    fallback: "NOT_FOUND"
-    required: true
-
-  buyer_tax_id:
-    parser: regex
-    patterns:
-      - 'NIP[:\.\s-]*(\d{3}[-\s]\d{3}[-\s]\d{2}[-\s]\d{2})'
-      - 'NIP[:\.\s-]*(\d{10})'
-    validator: nip
-    group: 1
-    context_keywords:
-      - "NABYWCA"
-      - "KUPUJĄCY"
+      - "PŁATNIK"
+      - "Nabywca"
+      - "Odbiorca"
     context_range: 300
-    required: true
 
-  buyer_address:
-    parser: address_extraction
-    context_keywords:
-      - "NABYWCA"
-    patterns:
-      - '(\d{2}-\d{3}\s+[A-ZĄŻŹĆŃŁÓĘŚ][a-zążźćńłóęś]+)'
-    context_range: 400
+# ============================================
+# KONFIGURACJA ADRESÓW
+# ============================================
+address:
+  patterns:
+    - '(\d{2}-\d{3}\s+[A-ZĄŻŹĆŃŁÓĘŚ][a-zążźćńłóęś]+(?:\s+[A-ZĄŻŹĆŃŁÓĘŚ][a-zążźćńłóęś]+)*)'
+    - '(ul\.\s+[A-ZĄŻŹĆŃŁÓĘŚa-zążźćńłóęś\s]+\d+[A-Za-z]?(?:/\d+)?)'
+  postal_code_pattern: '\d{2}-\d{3}'
+  context_range: 400
 
+# ============================================
+# KONFIGURACJA KONT BANKOWYCH
+# ============================================
+bank_accounts:
+  patterns:
+    - '(?:PL\s?)?\d{2}\s?\d{4}\s?\d{4}\s?\d{4}\s?\d{4}\s?\d{4}\s?\d{4}'
+    - '(?<!\d)\d{26}(?!\d)'
+    - 'PL\d{2}\s?\d{4}\s?\d{4}\s?\d{4}\s?\d{4}\s?\d{4}\s?\d{4}'
+  iban_prefix: "PL"
+  validation: "iban"
+
+# ============================================
+# KONFIGURACJA KWOT
+# ============================================
+amounts:
+  decimal_separator: ","
+  thousand_separator: " "
+  
   total_gross:
-    parser: money
     keywords:
       - "DO ZAPŁATY"
+      - "Do zapłaty"
       - "RAZEM"
+      - "Razem"
       - "SUMA"
       - "BRUTTO"
+      - "Brutto"
       - "OGÓŁEM"
+      - "Ogółem"
+      - "ŁĄCZNIE"
     patterns:
       - '(\d{1,3}(?:\s\d{3})*(?:,\d{2})?)\s*(?:zł|PLN|ZŁ)'
       - '(\d{1,3}(?:\.\d{3})*(?:,\d{2})?)\s*(?:zł|PLN)'
-    currency: "PLN"
-    decimal_separator: ","
-    thousand_separator: " "
     required: true
-
+  
   total_net:
-    parser: money
     keywords:
       - "NETTO"
+      - "Netto"
       - "WARTOŚĆ NETTO"
+      - "Wartość netto"
       - "PODSTAWA"
-    patterns:
-      - '(\d{1,3}(?:\s\d{3})*(?:,\d{2})?)\s*(?:zł|PLN)?'
-    currency: "PLN"
-    fallback: "calculate_from_gross:23"
-
+    fallback: "calculate_from_gross"
+    default_vat_rate: 23
+  
   total_vat:
-    parser: money
     keywords:
       - "VAT"
       - "PODATEK"
+      - "Podatek VAT"
       - "KWOTA VAT"
-    patterns:
-      - '(\d{1,3}(?:\s\d{3})*(?:,\d{2})?)\s*(?:zł|PLN)?'
-    currency: "PLN"
+      - "Kwota VAT"
     fallback: "calculate_difference"
 
-  currency:
-    parser: static
-    value: "PLN"
+# ============================================
+# KONFIGURACJA PŁATNOŚCI
+# ============================================
+payment:
+  methods:
+    przelew:
+      keywords: ["PRZELEW", "PRZELEWEM", "TRANSFER", "PRZELEW BANKOWY"]
+    gotówka:
+      keywords: ["GOTÓWKA", "GOTÓWKĄ", "CASH", "PŁATNOŚĆ GOTÓWKĄ"]
+    karta:
+      keywords: ["KARTA", "KARTĄ", "CARD", "PŁATNOŚĆ KARTĄ"]
+    kompensata:
+      keywords: ["KOMPENSATA", "POTRĄCENIE"]
+  
+  status:
+    opłacona:
+      keywords: ["ZAPŁACONO", "OPŁACONO", "PAID", "ZAPŁACONA", "OPŁACONA"]
+    częściowo_opłacona:
+      keywords: ["ZALICZKA", "CZĘŚCIOWO", "ADVANCE", "PARTIAL"]
+    nieopłacona:
+      keywords: ["DO ZAPŁATY", "NIEOPŁACONA", "UNPAID"]
+  
+  default_method: "przelew"
+  default_status: "nieopłacona"
 
-lines:
+# ============================================
+# KONFIGURACJA POZYCJI FAKTURY
+# ============================================
+line_items:
   enabled: true
-  start:
+  
+  table_start:
+    keywords:
+      - "LP"
+      - "L.p."
+      - "Lp."
+      - "NAZWA"
+      - "Nazwa towaru"
     patterns:
       - 'LP|L\.p\.|Lp\.'
       - 'Nazwa.*Ilość.*Cena'
-  end:
-    patterns:
-      - 'Razem|RAZEM|Suma|SUMA|DO ZAPŁATY'
-  line_pattern: '^(\d+)\s+(.+?)\s+([\d,\.]+)\s+([\d,\.]+)\s+([\d,\.]+)$'
-  line_fields:
-    - name: position
-      group: 1
-      type: int
-    - name: description
-      group: 2
-      type: string
-    - name: quantity
-      group: 3
-      type: decimal
-    - name: price_unit
-      group: 4
-      type: decimal
-    - name: total
-      group: 5
-      type: decimal
-  skip_lines:
-    patterns:
-      - 'Strona \d+ z \d+'
-      - '-{3,}'
+      - 'Opis.*Jm.*Ilość'
+  
+  table_end:
+    keywords:
+      - "RAZEM"
+      - "Razem"
+      - "SUMA"
+      - "Suma"
+      - "DO ZAPŁATY"
+      - "OGÓŁEM"
+  
+  skip_patterns:
+    - 'Strona \d+ z \d+'
+    - '-{3,}'
+    - '={3,}'
 
+# ============================================
+# OPCJE PARSOWANIA
+# ============================================
 options:
-  remove_whitespace: true
-  lowercase_keywords: false
+  normalize_backslash: true
+  remove_extra_whitespace: true
+  case_insensitive_keywords: true
   date_tolerance_days: 365
   amount_tolerance: 0.02
   tax_id_assignment_strategy: "context_proximity"
   validate_iban: true
+  validate_tax_id: true
   debug_mode: false
 
+# ============================================
+# METADANE
+# ============================================
 metadata:
   author: "System"
-  version: "1.0"
+  version: "2.0"
   created: "2025-11-29"
+  updated: "2025-11-29"
