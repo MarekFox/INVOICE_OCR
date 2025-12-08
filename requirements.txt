@@ -31,4 +31,6 @@ python-dateutil>=2.8.2
 # Parser YAML (już może być zainstalowany)
 PyYAML>=6.0
 
-opencv-python
+opencv-python==4.12.0.88
+
+scikit-learn==1.7.2
