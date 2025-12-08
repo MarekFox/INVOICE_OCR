@@ -7,6 +7,8 @@ Funkcje pomocnicze, walidatory, formattery
 import re
 import hashlib
 import requests
+import cv2
+import numpy as np
 from typing import Optional, List, Tuple, Dict, Any
 from datetime import datetime, timedelta
 from decimal import Decimal, ROUND_HALF_UP
@@ -498,3 +500,62 @@ class FileUtils:
         
         shutil.copy2(filepath, backup_path)
         return str(backup_path)
+    
+def detect_lines(image, min_line_length=100, line_gap=10, hough_threshold=100):
+    """
+    Wykrywa linie poziome i pionowe na obrazie (numpy BGR lub PIL Image konwertowany wcześniej).
+    Zwraca listę linii w formacie [ [x1,y1,x2,y2], ... ].
+
+    Args:
+        image: numpy array w formacie BGR
+        min_line_length: minimalna długość linii w px
+        line_gap: maksymalny odstęp między segmentami linii
+        hough_threshold: próg dla HoughLinesP
+
+    Returns:
+        lines: lista linii [ [x1,y1,x2,y2], ... ]
+    """
+    if image is None:
+        return []
+
+    if len(image.shape) == 3:
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = image
+
+    blur = cv2.GaussianBlur(gray, (3, 3), 0)
+
+    try:
+        th = cv2.adaptiveThreshold(blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                   cv2.THRESH_BINARY_INV, 15, 10)
+    except Exception:
+        _, th = cv2.threshold(blur, 128, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)
+
+    horizontal = th.copy()
+    vertical = th.copy()
+
+    cols = horizontal.shape[1]
+    horizontal_size = max(1, cols // 30)
+    horiz_structure = cv2.getStructuringElement(cv2.MORPH_RECT, (horizontal_size, 1))
+    horizontal = cv2.erode(horizontal, horiz_structure)
+    horizontal = cv2.dilate(horizontal, horiz_structure)
+
+    rows = vertical.shape[0]
+    vertical_size = max(1, rows // 30)
+    vert_structure = cv2.getStructuringElement(cv2.MORPH_RECT, (1, vertical_size))
+    vertical = cv2.erode(vertical, vert_structure)
+    vertical = cv2.dilate(vertical, vert_structure)
+
+    lines_mask = cv2.bitwise_or(horizontal, vertical)
+
+    edges = cv2.Canny(lines_mask, 50, 150, apertureSize=3)
+    raw_lines = cv2.HoughLinesP(edges, 1, np.pi / 180,
+                                threshold=hough_threshold,
+                                minLineLength=min_line_length,
+                                maxLineGap=line_gap)
+    lines = []
+    if raw_lines is not None:
+        for l in raw_lines:
+            x1, y1, x2, y2 = map(int, l[0])
+            lines.append([x1, y1, x2, y2])
+    return lines

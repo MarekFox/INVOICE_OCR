@@ -13,6 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from PyQt6.QtCore import QThread, pyqtSignal, QMutex, QMutexLocker
 import logging
+import numpy as np
 
 from pdf2image import convert_from_path
 from PIL import Image
@@ -24,7 +25,8 @@ from invoice_separator import AdvancedSeparator, InvoiceBoundary
 from parsers import SmartInvoiceParser, ParsedInvoice
 from validators import InvoiceValidator, ComparisonValidator
 from excel_generator import ExcelReportGenerator
-from utils import FileUtils
+from utils import FileUtils, detect_lines
+from layout_analyzer import analyze_layout, block_to_text
 
 logger = logging.getLogger(__name__)
 
@@ -111,43 +113,169 @@ class BatchProcessingThread(QThread):
         invoices = []
         excel_path = None
         statistics = {}
-        
+        ocr_results = None  # zainicjalizuj defensywnie
+
+        def _extract_tokens_from_ocr_results(ocr_results_list):
+            """
+            Zwraca listę tokenów w formacie:
+            {"text": str, "x0": float, "y0": float, "x1": float, "y1": float, "page": int}
+            Obsługuje różne formaty itemów: dict z kluczami, tuple/list, itp.
+            """
+            tokens = []
+            if not ocr_results_list:
+                return tokens
+            for page_idx, res in enumerate(ocr_results_list):
+                page_no = page_idx + 1  # boundary używa 1-based pages
+                # Spróbuj różnych możliwych pól
+                containers = []
+                # obiekt z atrybutem
+                for attr in ("word_boxes", "tokens", "words", "boxes", "text_boxes"):
+                    val = getattr(res, attr, None) if hasattr(res, attr) else None
+                    if not val and isinstance(res, dict):
+                        val = res.get(attr)
+                    if val:
+                        containers.append(val)
+                # jeśli nie znaleziono, sprawdź czy res ma natomiast pole 'text' i pola bboxy gdzieś indziej
+                if not containers:
+                    # jeżeli res jest dict i ma pola typu 'words' lub 'lines' - spróbuj zamapować
+                    if isinstance(res, dict):
+                        # możliwe, że res['elements'] zawiera tokeny
+                        for k in ("elements", "ocr_tokens", "elements_tokens"):
+                            if k in res and isinstance(res[k], (list,tuple)):
+                                containers.append(res[k])
+                                break
+                for container in containers:
+                    if not container:
+                        continue
+                    for item in container:
+                        try:
+                            if isinstance(item, dict):
+                                txt = item.get("text") or item.get("word") or item.get("label") or item.get("str") or ""
+                                # różne nazwy bbox
+                                x0 = item.get("x0", item.get("left", item.get("x", None)))
+                                y0 = item.get("y0", item.get("top", item.get("y", None)))
+                                x1 = item.get("x1", item.get("right", item.get("x2", None)))
+                                y1 = item.get("y1", item.get("bottom", item.get("y2", None)))
+                                # czasem są (x, y, w, h)
+                                if (x0 is not None and y0 is not None) and (x1 is None or y1 is None):
+                                    w = item.get("w") or item.get("width")
+                                    h = item.get("h") or item.get("height")
+                                    if w is not None:
+                                        x1 = x0 + w
+                                    if h is not None:
+                                        y1 = y0 + h
+                            elif isinstance(item, (list,tuple)):
+                                # możliwe formaty: (text,x0,y0,x1,y1) lub (x0,y0,x1,y1,text)
+                                if len(item) >= 5 and isinstance(item[0], str):
+                                    txt, x0, y0, x1, y1 = item[0], float(item[1]), float(item[2]), float(item[3]), float(item[4])
+                                elif len(item) >= 5 and isinstance(item[-1], str):
+                                    x0, y0, x1, y1, txt = float(item[0]), float(item[1]), float(item[2]), float(item[3]), item[4]
+                                else:
+                                    continue
+                            else:
+                                continue
+                            if txt is None:
+                                continue
+                            # upewnij się, że bbox jest kompletne
+                            if None in (x0, y0, x1, y1):
+                                continue
+                            tokens.append({
+                                "text": str(txt).strip(),
+                                "x0": float(x0),
+                                "y0": float(y0),
+                                "x1": float(x1),
+                                "y1": float(y1),
+                                "page": page_no
+                            })
+                        except Exception:
+                            # ignoruj pojedyncze niepoprawne tokeny
+                            continue
+            return tokens
+
         try:
             # 1. Konwersja PDF na obrazy
             self.progress.emit(task.task_id, 10, "Konwersja PDF...")
             images = self._convert_pdf_to_images(task.file_path)
             statistics['total_pages'] = len(images)
-            
+
+            # NOWY: wykryj linie na każdej stronie (zapisz w lines_per_page jako dict page->list_of_lines)
+            all_lines = []  # lista list: index 0 => page1 lines
+            for img in images:
+                # img może być PIL.Image lub numpy array; skonwertuj do numpy BGR
+                if not isinstance(img, np.ndarray):
+                    # PIL Image -> numpy RGB -> BGR
+                    img_np = np.array(img.convert('RGB'))[:, :, ::-1].copy()
+                else:
+                    img_np = img.copy()
+                try:
+                    page_lines = detect_lines(img_np)
+                except Exception as e:
+                    logger.exception("Błąd detekcji linii na obrazie: %s", e)
+                    page_lines = []
+                all_lines.append(page_lines)
+
+            # Przygotuj słownik lines_per_page (1-based pages)
+            lines_per_page = {i+1: lines for i, lines in enumerate(all_lines)}
+
             # 2. OCR wszystkich stron
             self.progress.emit(task.task_id, 20, "Rozpoznawanie tekstu (OCR)...")
             ocr_results = self._perform_ocr(images, task)
-            
+
+            # 2a. ANALIZA LAYOUT (bezpiecznie: w bloku try/except, nie powinno zatrzymać procesu)
+            try:
+                yaml_dir = os.path.join("Invoice Bot", "templates", "default")
+                all_tokens = _extract_tokens_from_ocr_results(ocr_results)
+                if all_tokens:
+                    blocks = analyze_layout(all_tokens, anchor_yaml_dir=yaml_dir, use_yaml_anchors=True, lines=lines_per_page)
+                else:
+                    blocks = []
+            except Exception as la_e:
+                logger.exception("Błąd podczas analyze_layout - pomijam analizę layoutu: %s", la_e)
+                blocks = []
+
             # 3. Separacja na faktury
             self.progress.emit(task.task_id, 40, "Wykrywanie granic faktur...")
             boundaries = self._separate_invoices(ocr_results, task)
             statistics['invoices_detected'] = len(boundaries)
-            
+
             # 4. Parsowanie każdej faktury
             self.progress.emit(task.task_id, 60, "Parsowanie danych...")
             for i, boundary in enumerate(boundaries):
-                invoice_text = self._merge_boundary_text(ocr_results, boundary)
+                # Wyciągnij tekst tylko dla stron w granicach boundary używając wykrytych bloków (jeśli są)
+                invoice_text = None
+                try:
+                    if blocks:
+                        start_p = boundary.start_page
+                        end_p = boundary.end_page
+                        # wybierz bloki należące do stron boundary
+                        boundary_blocks = [b for b in blocks if start_p <= b.get("page", 0) <= end_p]
+                        if boundary_blocks:
+                            sorted_blocks = sorted(boundary_blocks, key=lambda b: (b["page"], b["bbox"][1], b["bbox"][0]))
+                            invoice_text = "\n".join(block_to_text(b) for b in sorted_blocks)
+                    # fallback: oryginalna metoda łączenia tekstu jeśli nie mamy bloków lub invoice_text jest pusty
+                    if not invoice_text:
+                        invoice_text = self._merge_boundary_text(ocr_results, boundary)
+                except Exception as e_blk:
+                    logger.exception("Błąd przy tworzeniu tekstu faktury z bloków: %s", e_blk)
+                    invoice_text = self._merge_boundary_text(ocr_results, boundary)
+
                 parsed = self._parse_invoice(invoice_text, boundary, task)
-                
+
                 if parsed:
                     invoices.append(parsed)
                     self.invoice_found.emit(task.task_id, parsed)
-                    
-                progress = 60 + int((i / len(boundaries)) * 30)
+
+                progress = 60 + int((i / len(boundaries)) * 30) if len(boundaries) > 0 else 90
                 self.progress.emit(
-                    task.task_id, 
-                    progress, 
+                    task.task_id,
+                    progress,
                     f"Parsowanie faktury {i+1}/{len(boundaries)}"
                 )
-                
+
             # 5. Walidacja i oznaczanie
             self.progress.emit(task.task_id, 90, "Walidacja danych...")
             self._validate_invoices(invoices, task)
-            
+
             # 6. Wykrywanie duplikatów
             duplicates = ComparisonValidator.find_duplicates(
                 [self._invoice_to_dict(inv) for inv in invoices]
@@ -157,23 +285,23 @@ class BatchProcessingThread(QThread):
                 for i, j in duplicates:
                     invoices[i].is_duplicate = True
                     invoices[j].is_duplicate = True
-                    
+
             # 7. Generowanie Excel
             if task.options.get('generate_excel', True):
                 self.progress.emit(task.task_id, 95, "Generowanie raportu Excel...")
                 excel_path = self._generate_excel(invoices, task)
-                
+
             # Statystyki końcowe
             statistics.update({
                 'invoices_parsed': len(invoices),
-                'invoices_valid': sum(1 for inv in invoices if inv.is_verified),
-                'invoices_with_errors': sum(1 for inv in invoices if inv.parsing_errors),
-                'total_amount': sum(float(inv.total_gross) for inv in invoices),
+                'invoices_valid': sum(1 for inv in invoices if getattr(inv, "is_verified", False)),
+                'invoices_with_errors': sum(1 for inv in invoices if getattr(inv, "parsing_errors", None)),
+                'total_amount': sum((float(getattr(inv, "total_gross", 0) or 0) for inv in invoices)),
                 'processing_time': time.time() - file_start
             })
-            
+
             self.progress.emit(task.task_id, 100, "Zakończono!")
-            
+
             return ProcessingResult(
                 task_id=task.task_id,
                 success=True,
@@ -183,7 +311,7 @@ class BatchProcessingThread(QThread):
                 errors=errors,
                 statistics=statistics
             )
-            
+
         except Exception as e:
             logger.error(f"Krytyczny błąd w _process_single_file: {e}")
             logger.error(traceback.format_exc())
