@@ -1,22 +1,14 @@
 # layout_analyzer.py
 """
-Layout Analyzer - wersja wykorzystująca scikit-learn (DBSCAN / Agglomerative) z fallbackem.
+Layout Analyzer - rozszerzona wersja z segmentacją po liniach i łączeniem bloków.
 Wejście:
   tokens = [
-    {"text": str, "x0": float, "y0": float, "x1": float, "y1": float, "conf": float (opt), "page": int},
+    {"text": str, "x0": float, "y0": float, "x1": float, "y1": float, "confidence": float (opt), "page": int},
     ...
   ]
-
-Wyjście: lista bloków:
-  {
-    "block_id": str,
-    "page": int,
-    "type": "table"|"column"|"anchor"|"free_text",
-    "bbox": (x0,y0,x1,y1),
-    "tokens": [...],
-    "rows": optional (dla tabela),
-    "columns": optional (dla tabela)
-  }
+Opcjonalnie:
+  lines = { page_index: [ [x1,y1,x2,y2], ... ] }  # współrzędne w tych samych jednostkach co tokeny (piksele lub normalizowane)
+Wyjście: lista bloków zgodna z wcześniejszym API.
 """
 from typing import List, Dict, Optional, Tuple
 from collections import defaultdict
@@ -46,20 +38,23 @@ except Exception:
 
 # --- Domyślne parametry (można nadpisać przez argumenty)
 DEFAULTS = {
-    "eps_x": 0.03,          # eps dla DBSCAN po X (normalizowany 0..1)
-    "eps_y": 0.012,         # eps dla DBSCAN po Y
-    "min_samples_col": 2,
-    "min_samples_row": 1,
-    "agg_n_clusters_cols": None,   # opcjonalne: jeśli chcesz wymusić liczbę kolumn
+    "eps_x": 0.04,          # eps dla DBSCAN po X (normalizowany 0..1)
+    "eps_y": 0.02,          # eps dla DBSCAN po Y
+    "min_samples_col": 3,
+    "min_samples_row": 2,
+    "agg_n_clusters_cols": None,
     "normalize": True,
-    "anchor_margin_x": 0.12,
-    "anchor_margin_y": 0.06,
+    "anchor_margin_x": 0.08,
+    "anchor_margin_y": 0.03,
     "min_table_rows": 2,
     "min_table_cols": 2,
-    "debug": False
+    "debug": False,
+    "cell_min_tokens": 2,    # minimalna liczba tokenów żeby komórka była istotna
+    "merge_iou_threshold": 0.02,  # IoU lub dystans progowy do łączenia bloków
+    "max_anchor_vertical_expand_cells": 10
 }
 
-# ----------------- Helpers -----------------
+# ---- Helpers ----
 def _new_block_id(page:int) -> str:
     return f"p{page}_b{uuid.uuid4().hex[:6]}"
 
@@ -94,17 +89,11 @@ def _normalize_tokens(tokens:List[Dict]) -> List[Dict]:
         out.append(nt)
     return out
 
-# ----------------- Anchors loader -----------------
+# ---- Anchors loader (rozszerzony: czyta sekcję anchors jeśli jest) ----
 def load_anchors_from_yaml_dir(yaml_dir: str) -> List[str]:
-    """
-    Wczyta listy anchorów (keywords) z plików YAML w katalogu.
-    Zwróci unikalną listę anchorów w formie lower-case strings.
-    """
     anchors = set()
     if not YAML_AVAILABLE:
-        # fallback: nic nie ładujemy
         return []
-    # akceptujemy slashes/backslashes - normalize path
     yaml_dir = os.path.normpath(yaml_dir)
     if not os.path.isdir(yaml_dir):
         return []
@@ -116,26 +105,27 @@ def load_anchors_from_yaml_dir(yaml_dir: str) -> List[str]:
             continue
         if not isinstance(data, dict):
             continue
-        # collect top-level keywords
+        # collect explicit anchors section
+        if "anchors" in data and isinstance(data["anchors"], list):
+            for a in data["anchors"]:
+                anchors.add(str(a).lower())
+        # fallback: existing keywords / line_items etc.
         for key in ("keywords",):
             if key in data and isinstance(data[key], list):
                 for k in data[key]:
                     anchors.add(str(k).lower())
-        # collect table_start keywords
-        li = data.get("line_items") or data.get("line_items", {})
+        li = data.get("line_items") or {}
         if isinstance(li, dict):
             ts = li.get("table_start") or {}
             if isinstance(ts, dict):
                 kws = ts.get("keywords") or []
                 for k in kws:
                     anchors.add(str(k).lower())
-        # collect invoice_number line_keywords
         inv = data.get("invoice_number") or {}
         if isinstance(inv, dict):
             lks = inv.get("line_keywords") or []
             for k in lks:
                 anchors.add(str(k).lower())
-        # amounts total keywords
         amounts = data.get("amounts") or {}
         if isinstance(amounts, dict):
             tg = amounts.get("total_gross") or {}
@@ -145,26 +135,19 @@ def load_anchors_from_yaml_dir(yaml_dir: str) -> List[str]:
                     anchors.add(str(k).lower())
     return sorted([a for a in anchors if isinstance(a, str)])
 
-# ----------------- Clustering (sklearn / fallback) -----------------
+# ---- Clustering (sklearn / fallback) ----
 def cluster_columns(tokens:List[Dict], eps:float = None, min_samples:int = None, agg_n_clusters:Optional[int]=None):
-    """
-    Zwraca listę grup (list of token lists) - grupowanie po X (kolumny)
-    Używa DBSCAN po X jeśli sklearn dostępny, w przeciwnym razie prosty greedy clustering.
-    """
     if eps is None: eps = DEFAULTS["eps_x"]
     if min_samples is None: min_samples = DEFAULTS["min_samples_col"]
     toks_sorted = sorted(tokens, key=lambda t: _centroid(t)[0])
     if SKLEARN_AVAILABLE:
         X = np.array([[_centroid(t)[0]] for t in toks_sorted])
-        # DBSCAN na 1D
         db = DBSCAN(eps=eps, min_samples=min_samples).fit(X)
         labels = db.labels_
         groups = defaultdict(list)
         for t, lab in zip(toks_sorted, labels):
             groups[lab].append(t)
-        # label -1 are noise; we still keep them as singletons if needed
         clusters = [groups[k] for k in sorted(groups.keys(), key=lambda x: (x==-1, x))]
-        # If user provided agg_n_clusters, try Agglomerative
         if agg_n_clusters and agg_n_clusters > 0:
             try:
                 ac = AgglomerativeClustering(n_clusters=agg_n_clusters).fit(X)
@@ -177,7 +160,6 @@ def cluster_columns(tokens:List[Dict], eps:float = None, min_samples:int = None,
                 pass
         return clusters
     else:
-        # fallback: greedy cluster by gap
         clusters = []
         cur = []
         last_x = None
@@ -188,7 +170,6 @@ def cluster_columns(tokens:List[Dict], eps:float = None, min_samples:int = None,
             else:
                 if abs(cx - last_x) <= eps:
                     cur.append(t)
-                    # update last_x as running average to allow drift
                     last_x = (last_x * (len(cur)-1) + cx) / len(cur)
                 else:
                     clusters.append(cur)
@@ -198,9 +179,6 @@ def cluster_columns(tokens:List[Dict], eps:float = None, min_samples:int = None,
         return clusters
 
 def cluster_rows(tokens:List[Dict], eps:float = None, min_samples:int = None):
-    """
-    Grupowanie wierszy (po Y). DBSCAN na Y (1D) lub prosty greedy.
-    """
     if eps is None: eps = DEFAULTS["eps_y"]
     if min_samples is None: min_samples = DEFAULTS["min_samples_row"]
     toks_sorted = sorted(tokens, key=lambda t: _centroid(t)[1])
@@ -232,7 +210,7 @@ def cluster_rows(tokens:List[Dict], eps:float = None, min_samples:int = None):
             rows.append(cur)
         return rows
 
-# ----------------- Anchor detection -----------------
+# ---- Anchor detection ----
 def anchor_blocks(tokens:List[Dict], anchors:List[str], margin_x:float=None, margin_y:float=None):
     if margin_x is None: margin_x = DEFAULTS["anchor_margin_x"]
     if margin_y is None: margin_y = DEFAULTS["anchor_margin_y"]
@@ -242,7 +220,6 @@ def anchor_blocks(tokens:List[Dict], anchors:List[str], margin_x:float=None, mar
     blocks = []
     for t in tokens:
         txt = (t.get("text","") or "").lower()
-        # match exact anchor token or contains anchor phrase
         matched = any((txt == a) or (a in txt) or re.search(r'\b' + re.escape(a) + r'\b', txt) for a in anchors_lower)
         if matched:
             p = t.get("page", 0)
@@ -260,7 +237,7 @@ def anchor_blocks(tokens:List[Dict], anchors:List[str], margin_x:float=None, mar
             })
     return blocks
 
-# ----------------- Table detection -----------------
+# ---- Table detection (bez zmian istotnych) ----
 def detect_tables(tokens:List[Dict], eps_x:Optional[float]=None, eps_y:Optional[float]=None, min_rows:int=None, min_cols:int=None):
     if eps_x is None: eps_x = DEFAULTS["eps_x"]
     if eps_y is None: eps_y = DEFAULTS["eps_y"]
@@ -275,9 +252,7 @@ def detect_tables(tokens:List[Dict], eps_x:Optional[float]=None, eps_y:Optional[
             continue
         rows = cluster_rows(toks, eps=eps_y)
         cols = cluster_columns(toks, eps=eps_x)
-        # sanity checks
         if len(rows) >= min_rows and len(cols) >= min_cols:
-            # build grid: for each row and col, intersection tokens
             grid = []
             for r in rows:
                 row_cells = []
@@ -297,19 +272,133 @@ def detect_tables(tokens:List[Dict], eps_x:Optional[float]=None, eps_y:Optional[
             })
     return tables
 
-# ----------------- Main analyze function -----------------
+# ---- Geometry helpers ----
+def rect_iou(a:Tuple[float,float,float,float], b:Tuple[float,float,float,float]) -> float:
+    ax0, ay0, ax1, ay1 = a
+    bx0, by0, bx1, by1 = b
+    ix0 = max(ax0, bx0); iy0 = max(ay0, by0)
+    ix1 = min(ax1, bx1); iy1 = min(ay1, by1)
+    if ix1 <= ix0 or iy1 <= iy0:
+        return 0.0
+    inter = (ix1-ix0)*(iy1-iy0)
+    area_a = (ax1-ax0)*(ay1-ay0)
+    area_b = (bx1-bx0)*(by1-by0)
+    union = area_a + area_b - inter
+    return inter/union if union>0 else 0.0
+
+# ---- Grid-based segmentation using lines ----
+def grid_cells_from_lines(tokens:List[Dict], lines_norm:List[List[float]], cell_min_tokens:int = None):
+    """
+    lines_norm: lista znormalizowanych linii dla strony: [[nx1,ny1,nx2,ny2], ...]
+    Zwraca listę komórek: { 'ix','iy','bbox', 'tokens' }
+    """
+    if cell_min_tokens is None:
+        cell_min_tokens = DEFAULTS["cell_min_tokens"]
+    # zebranie linii pionowych i poziomych (środkowe współrzędne)
+    vx = sorted([(l[0]+l[2])/2.0 for l in lines_norm if abs(l[0]-l[2]) < 0.02])
+    hy = sorted([(l[1]+l[3])/2.0 for l in lines_norm if abs(l[1]-l[3]) < 0.02])
+    x_edges = [0.0] + vx + [1.0]
+    y_edges = [0.0] + hy + [1.0]
+    cells = []
+    for ix in range(len(x_edges)-1):
+        e0 = x_edges[ix]; e1 = x_edges[ix+1]
+        for iy in range(len(y_edges)-1):
+            f0 = y_edges[iy]; f1 = y_edges[iy+1]
+            # token is considered in cell if its centroid belongs to cell OR bbox overlaps > small threshold
+            cell_toks = []
+            for t in tokens:
+                cx, cy = _centroid(t)
+                if (cx >= e0 - 1e-9 and cx <= e1 + 1e-9 and cy >= f0 - 1e-9 and cy <= f1 + 1e-9):
+                    cell_toks.append(t)
+                else:
+                    # fallback by bbox overlap: if token bbox overlap with cell bbox > 0.3 of token area -> include
+                    tx0, ty0, tx1, ty1 = t["x0"], t["y0"], t["x1"], t["y1"]
+                    overlap_x = max(0, min(tx1, e1) - max(tx0, e0))
+                    overlap_y = max(0, min(ty1, f1) - max(ty0, f0))
+                    if overlap_x>0 and overlap_y>0:
+                        tok_area = (tx1-tx0)*(ty1-ty0)
+                        if tok_area>0 and (overlap_x*overlap_y)/tok_area >= 0.3:
+                            cell_toks.append(t)
+            if len(cell_toks) >= cell_min_tokens:
+                bbox = (e0, f0, e1, f1)
+                cells.append({"ix": ix, "iy": iy, "bbox": bbox, "tokens": cell_toks})
+    return cells, x_edges, y_edges
+
+# ---- Merge adjacent cells by connectivity (simple region growing) ----
+def merge_adjacent_cells(cells:List[Dict], x_edges:List[float], y_edges:List[float]):
+    # build lookup by grid index
+    lookup = {}
+    for c in cells:
+        lookup[(c["ix"], c["iy"])] = c
+    visited = set()
+    merged = []
+    for key, cell in lookup.items():
+        if key in visited:
+            continue
+        stack = [key]; visited.add(key)
+        group = []
+        while stack:
+            cur = stack.pop()
+            group.append(lookup[cur])
+            ix, iy = cur
+            # neighbours: up/down/left/right
+            for dx,dy in [(1,0),(-1,0),(0,1),(0,-1)]:
+                nb = (ix+dx, iy+dy)
+                if nb in lookup and nb not in visited:
+                    visited.add(nb); stack.append(nb)
+        # merge group into single block
+        toks = []
+        xs = []; ys = []
+        for g in group:
+            toks.extend(g["tokens"])
+            x0,y0,x1,y1 = g["bbox"]
+            xs.append(x0); xs.append(x1)
+            ys.append(y0); ys.append(y1)
+        bbox = (min(xs), min(ys), max(xs), max(ys))
+        merged.append({"block_id": _new_block_id(0), "page": 0, "type": "cell_group", "bbox": bbox, "tokens": toks})
+    return merged
+
+# ---- Merge blocks by overlap/proximity ----
+def merge_close_blocks(blocks:List[Dict], merge_iou:float=None):
+    if merge_iou is None:
+        merge_iou = DEFAULTS["merge_iou_threshold"]
+    if not blocks:
+        return []
+    blocks = sorted(blocks, key=lambda b: (b["page"], b["bbox"][1], b["bbox"][0]))
+    merged = []
+    used = [False]*len(blocks)
+    for i,b in enumerate(blocks):
+        if used[i]:
+            continue
+        bx = b["bbox"]
+        toks = b.get("tokens", [])[:]
+        used[i] = True
+        for j in range(i+1, len(blocks)):
+            if used[j]: continue
+            if blocks[j]["page"] != b["page"]: continue
+            iou = rect_iou(bx, blocks[j]["bbox"])
+            if iou >= merge_iou:
+                # merge
+                bx = (min(bx[0], blocks[j]["bbox"][0]),
+                      min(bx[1], blocks[j]["bbox"][1]),
+                      max(bx[2], blocks[j]["bbox"][2]),
+                      max(bx[3], blocks[j]["bbox"][3]))
+                toks.extend(blocks[j].get("tokens", []))
+                used[j] = True
+        merged.append({"block_id": _new_block_id(b["page"]), "page": b["page"], "type": b.get("type","merged"), "bbox": bx, "tokens": toks})
+    return merged
+
+# ---- Main analyze function (rozszerzona) ----
 def analyze_layout(tokens: List[Dict],
                    anchor_files_or_list: Optional[List[str]] = None,
                    anchor_yaml_dir: Optional[str] = None,
                    use_yaml_anchors: bool = True,
                    use_table_detection: bool = True,
                    params: Optional[Dict] = None,
-                   lines: Optional[Dict[int, List[List[int]]]] = None) -> List[Dict]:
+                   lines: Optional[Dict[int, List[List[float]]]] = None) -> List[Dict]:
     """
     tokens - lista tokenów (dicty z x0,y0,x1,y1,text,page)
-    anchor_files_or_list - opcjonalna lista anchorów (strings) lub None
-    anchor_yaml_dir - jeśli podano i YAML dostępny, wczyta anchors z katalogu (np. "Invoice Bot/templates/default")
-    lines - opcjonalny dict {page_number: [[x1,y1,x2,y2], ...]} z wykrytymi liniami (w pikselach)
+    lines - optional dict {page: [[x1,y1,x2,y2], ...]} with line coordinates (same units as tokens)
     """
     # apply runtime params
     if params:
@@ -328,88 +417,168 @@ def analyze_layout(tokens: List[Dict],
         anchors.extend(anchors_from_yaml)
     anchors = sorted(set(anchors))
 
-    # anchor blocks
-    anchor_bs = anchor_blocks(tokens_n, anchors) if anchors else []
-
-    # table detection
-    tables = detect_tables(tokens_n) if use_table_detection else []
-
-    # column blocks (if not part of table)
-    col_blocks = []
+    # group tokens per page
     by_page = defaultdict(list)
     for t in tokens_n:
         by_page[t["page"]].append(t)
 
-    # Normalize lines coordinates to token coordinate space (0..1)
-    lines_norm = {}
-    if lines:
-        page_max = defaultdict(lambda: {"mx": 1.0, "my": 1.0})
-        for t in tokens_n:
-            p = t.get("page", 0)
-            page_max[p]["mx"] = max(page_max[p]["mx"], t.get("x1", page_max[p]["mx"]))
-            page_max[p]["my"] = max(page_max[p]["my"], t.get("y1", page_max[p]["my"]))
-        for p, llist in lines.items():
-            norm_list = []
-            mx = page_max.get(p, {}).get("mx", 1.0) or 1.0
-            my = page_max.get(p, {}).get("my", 1.0) or 1.0
-            for (x1, y1, x2, y2) in llist:
-                nx1 = x1 / mx
-                nx2 = x2 / mx
-                ny1 = y1 / my
-                ny2 = y2 / my
-                norm_list.append([nx1, ny1, nx2, ny2])
-            lines_norm[p] = norm_list
+    all_blocks = []
 
+    # detect tables first (they have priority)
+    if use_table_detection:
+        tables = detect_tables(tokens_n)
+    else:
+        tables = []
+
+    # for each page, process lines -> grid -> cells -> anchor expansion
     for page, toks in by_page.items():
-        page_lines = lines_norm.get(page, [])
-        # Extract vertical lines (x1 ~ x2)
-        vertical_x = sorted([(l[0] + l[2]) / 2.0 for l in page_lines if abs(l[0] - l[2]) < 0.02])
-        if vertical_x:
-            edges = [0.0] + vertical_x + [1.0]
-            for e0, e1 in zip(edges[:-1], edges[1:]):
-                bucket = [t for t in toks if (t['x0'] >= e0 - 1e-9 and t['x1'] <= e1 + 1e-9)]
-                if bucket and len(bucket) >= 2:
-                    bbox = _bbox_from_tokens(bucket)
-                    col_blocks.append({
+        page_tokens = toks
+        page_lines = None
+        if lines and page in lines:
+            # normalize lines to 0..1 using per-page maxima
+            page_max = {"mx":1.0,"my":1.0}
+            for t in page_tokens:
+                page_max["mx"] = max(page_max["mx"], t.get("x1", page_max["mx"]))
+                page_max["my"] = max(page_max["my"], t.get("y1", page_max["my"]))
+            norm_lines = []
+            mx = page_max["mx"] or 1.0
+            my = page_max["my"] or 1.0
+            for (x1,y1,x2,y2) in lines.get(page, []):
+                nx1 = x1 / mx; nx2 = x2 / mx; ny1 = y1 / my; ny2 = y2 / my
+                norm_lines.append([nx1, ny1, nx2, ny2])
+            page_lines = norm_lines
+
+        # 1) If have lines -> build grid cells
+        page_blocks = []
+        if page_lines:
+            cells, x_edges, y_edges = grid_cells_from_lines(page_tokens, page_lines, cell_min_tokens=DEFAULTS["cell_min_tokens"])
+            # set real page ids for merged cells later
+            for c in cells:
+                c["page"] = page
+            # merge adjacent cells (region growing)
+            cell_groups = merge_adjacent_cells(cells, x_edges, y_edges)
+            # set page ids and types
+            for g in cell_groups:
+                g["page"] = page
+                g["type"] = "cell_group"
+            page_blocks.extend(cell_groups)
+        else:
+            # fallback: cluster columns (existing behavior)
+            cols = cluster_columns(page_tokens)
+            for c in cols:
+                if len(c) < 2:
+                    continue
+                bbox = _bbox_from_tokens(c)
+                page_blocks.append({
+                    "block_id": _new_block_id(page),
+                    "page": page,
+                    "type": "column",
+                    "bbox": bbox,
+                    "tokens": c
+                })
+
+        # 2) anchor detection in this page and expand anchor blocks along vertical grid
+        anchor_bs = anchor_blocks(page_tokens, anchors) if anchors else []
+        # expand anchors: try to attach neighboring cell_groups in same x-band (if grid exist)
+        if page_lines and anchor_bs:
+            # compute cols edges again
+            vx = sorted([(l[0]+l[2])/2.0 for l in page_lines if abs(l[0]-l[2]) < 0.02])
+            x_edges = [0.0] + vx + [1.0]
+            # helper: find ix for center
+            for a in anchor_bs:
+                ax0, ay0, ax1, ay1 = a["bbox"]
+                cx = (ax0+ax1)/2.0
+                # determine column index
+                ix = None
+                for ii in range(len(x_edges)-1):
+                    if cx >= x_edges[ii] - 1e-9 and cx <= x_edges[ii+1] + 1e-9:
+                        ix = ii; break
+                # collect all cell_groups in this ix
+                selected = []
+                for b in page_blocks:
+                    # cell_group b bbox: check if its x-range overlaps column band
+                    bx0, by0, bx1, by1 = b["bbox"]
+                    # compute mid x
+                    midx = (bx0 + bx1)/2.0
+                    if ix is None:
+                        # fallback: overlap heuristic
+                        if not (bx1 < ax0 or bx0 > ax1):
+                            selected.append(b)
+                    else:
+                        if midx >= x_edges[ix]-1e-9 and midx <= x_edges[ix+1]+1e-9:
+                            selected.append(b)
+                # now choose those selected which are vertically close to anchor
+                sel_sorted = sorted(selected, key=lambda b: b["bbox"][1])
+                # include contiguous ones that are near anchor vertical span (or until a major gap)
+                merged_tokens = []
+                miny = min(a["bbox"][1],)
+                maxy = max(a["bbox"][3],)
+                count = 0
+                for s in sel_sorted:
+                    sb = s["bbox"]
+                    # treat as contiguous if vertical overlap / adjacency
+                    # include if bbox overlaps anchor vertical span or sits below/above but within some limit
+                    if not (sb[3] < a["bbox"][1] - 0.05 or sb[1] > a["bbox"][3] + 0.05):
+                        merged_tokens.extend(s.get("tokens", []))
+                        count += 1
+                if merged_tokens:
+                    # create expanded anchor block
+                    all_tokens = a.get("tokens", []) + merged_tokens
+                    bbox = _bbox_from_tokens(all_tokens)
+                    page_blocks.append({
                         "block_id": _new_block_id(page),
                         "page": page,
-                        "type": "column",
+                        "type": "anchor",
                         "bbox": bbox,
-                        "tokens": bucket
+                        "tokens": all_tokens
                     })
-            continue
+                else:
+                    # fallback: keep the small anchor block itself
+                    page_blocks.append(a)
+        else:
+            # no grid or no anchors -> just keep anchor blocks
+            page_blocks.extend(anchor_bs)
 
-        # fallback to existing cluster_columns if no vertical lines detected
-        cols = cluster_columns(toks)
-        for c in cols:
-            if len(c) < 2:
+        # 3) add detected tables for this page (priority)
+        page_tables = [t for t in tables if t["page"] == page]
+        # mark tokens used by tables
+        used_ids = set()
+        for t in page_tables:
+            for tok in t["tokens"]:
+                used_ids.add(id(tok))
+
+        # integrate page_blocks but try not to duplicate table tokens
+        final_blocks = []
+        # add tables first
+        final_blocks.extend(page_tables)
+
+        # filter page_blocks that do not only contain table tokens
+        for b in page_blocks:
+            toks_b = [tk for tk in b.get("tokens", []) if id(tk) not in used_ids]
+            if not toks_b:
                 continue
-            bbox = _bbox_from_tokens(c)
-            col_blocks.append({
-                "block_id": _new_block_id(page),
-                "page": page,
-                "type": "column",
-                "bbox": bbox,
-                "tokens": c
-            })
+            b2 = b.copy()
+            b2["tokens"] = toks_b
+            final_blocks.append(b2)
 
-    # merge blocks into final list and create free_text for unused tokens
-    blocks = []
-    blocks.extend(tables)
-    blocks.extend(anchor_bs)
-    blocks.extend(col_blocks)
+        # 4) merge close/small blocks to reduce over-segmentation
+        merged = merge_close_blocks(final_blocks, merge_iou=DEFAULTS["merge_iou_threshold"])
 
-    # mark tokens used
+        # assign correct page ids (if some helpers created page 0)
+        for m in merged:
+            m["page"] = page
+        all_blocks.extend(merged)
+
+    # mark tokens used across all_blocks and add free_text blocks for leftover tokens
     used = set()
-    for b in blocks:
-        for t in b["tokens"]:
+    for b in all_blocks:
+        for t in b.get("tokens", []):
             used.add(id(t))
-
-    # fallback free_text blocks per page
+    # leftover tokens per page
     for page, toks in by_page.items():
         unused = [t for t in toks if id(t) not in used]
         if unused:
-            blocks.append({
+            all_blocks.append({
                 "block_id": _new_block_id(page),
                 "page": page,
                 "type": "free_text",
@@ -418,20 +587,19 @@ def analyze_layout(tokens: List[Dict],
             })
 
     if DEFAULTS.get("debug"):
-        print(f"[layout_analyzer] created {len(blocks)} blocks (tables={len(tables)}, anchors={len(anchor_bs)}, columns={len(col_blocks)})")
+        print(f"[layout_analyzer] created {len(all_blocks)} blocks (pages={len(by_page)})")
 
-    return blocks
+    return all_blocks
 
-# ----------------- Utility for parser integration -----------------
+# ---- Utility for parser integration ----
 def block_to_text(block:Dict, order:str="top_down_left_right") -> str:
     toks = block.get("tokens", [])
     if order == "top_down_left_right":
         toks = sorted(toks, key=lambda t: (_centroid(t)[1], _centroid(t)[0]))
     return " ".join((t.get("text","") or "").strip() for t in toks)
 
-# ----------------- Simple CLI/test -----------------
+# ---- CLI for quick test (unchanged) ----
 if __name__ == "__main__":
-    # Example tokens (normalizowane) - prosty test
     sample = [
         {"text":"Invoice","x0":0.05,"y0":0.05,"x1":0.2,"y1":0.07,"page":0},
         {"text":"Seller","x0":0.05,"y0":0.1,"x1":0.25,"y1":0.12,"page":0},
@@ -442,10 +610,9 @@ if __name__ == "__main__":
         {"text":"1","x0":0.3,"y0":0.25,"x1":0.32,"y1":0.27,"page":0},
         {"text":"100","x0":0.5,"y0":0.25,"x1":0.57,"y1":0.27,"page":0},
     ]
-    # przykład: wczytaj anchors z katalogu (dostosuj ścieżkę)
     yaml_dir = os.path.join("Invoice Bot", "templates", "default")
     anchors = load_anchors_from_yaml_dir(yaml_dir) if YAML_AVAILABLE else []
-    print("Loaded anchors:", anchors[:20])
-    blocks = analyze_layout(sample, anchor_files_or_list=None, anchor_yaml_dir=yaml_dir, use_yaml_anchors=True)
+    print("Loaded anchors:", anchors[:40])
+    blocks = analyze_layout(sample, anchor_files_or_list=None, anchor_yaml_dir=yaml_dir, use_yaml_anchors=True, lines=None)
     from pprint import pprint
     pprint(blocks)
