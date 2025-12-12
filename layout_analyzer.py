@@ -1,13 +1,16 @@
 # layout_analyzer.py
 """
 Layout Analyzer - rozszerzona wersja z segmentacją po liniach i łączeniem bloków.
+
 Wejście:
   tokens = [
     {"text": str, "x0": float, "y0": float, "x1": float, "y1": float, "confidence": float (opt), "page": int},
     ...
   ]
+
 Opcjonalnie:
   lines = { page_index: [ [x1,y1,x2,y2], ... ] }  # współrzędne w tych samych jednostkach co tokeny (piksele lub normalizowane)
+
 Wyjście: lista bloków zgodna z wcześniejszym API.
 """
 from typing import List, Dict, Optional, Tuple
@@ -81,7 +84,7 @@ def _normalize_tokens(tokens:List[Dict]) -> List[Dict]:
         mx = pages[p]["max_x"] or 1.0
         my = pages[p]["max_y"] or 1.0
         nt = t.copy()
-        if DEFAULTS["normalize"] and (mx > 1.0 or my > 1.0):
+        if DEFAULTS.get("normalize", True) and (mx > 1.0 or my > 1.0):
             nt["x0"] = nt["x0"] / mx
             nt["x1"] = nt["x1"] / mx
             nt["y0"] = nt["y0"] / my
@@ -315,9 +318,9 @@ def grid_cells_from_lines(tokens:List[Dict], lines_norm:List[List[float]], cell_
                     tx0, ty0, tx1, ty1 = t["x0"], t["y0"], t["x1"], t["y1"]
                     overlap_x = max(0, min(tx1, e1) - max(tx0, e0))
                     overlap_y = max(0, min(ty1, f1) - max(ty0, f0))
-                    if overlap_x>0 and overlap_y>0:
-                        tok_area = (tx1-tx0)*(ty1-ty0)
-                        if tok_area>0 and (overlap_x*overlap_y)/tok_area >= 0.3:
+                    if overlap_x > 0 and overlap_y > 0:
+                        tok_area = (tx1 - tx0) * (ty1 - ty0)
+                        if tok_area > 0 and (overlap_x * overlap_y) / tok_area >= 0.3:
                             cell_toks.append(t)
             if len(cell_toks) >= cell_min_tokens:
                 bbox = (e0, f0, e1, f1)
@@ -380,9 +383,9 @@ def merge_close_blocks(blocks:List[Dict], merge_iou:float=None):
             if iou >= merge_iou:
                 # merge
                 bx = (min(bx[0], blocks[j]["bbox"][0]),
-                      min(bx[1], blocks[j]["bbox"][1]),
-                      max(bx[2], blocks[j]["bbox"][2]),
-                      max(bx[3], blocks[j]["bbox"][3]))
+                    min(bx[1], blocks[j]["bbox"][1]),
+                    max(bx[2], blocks[j]["bbox"][2]),
+                    max(bx[3], blocks[j]["bbox"][3]))
                 toks.extend(blocks[j].get("tokens", []))
                 used[j] = True
         merged.append({"block_id": _new_block_id(b["page"]), "page": b["page"], "type": b.get("type","merged"), "bbox": bx, "tokens": toks})
@@ -399,8 +402,13 @@ def analyze_layout(tokens: List[Dict],
     """
     tokens - lista tokenów (dicty z x0,y0,x1,y1,text,page)
     lines - optional dict {page: [[x1,y1,x2,y2], ...]} with line coordinates (same units as tokens)
+    params - optional dict:
+        debug (bool)
+        save_debug_json (bool)
+        save_debug_dir (str)
+        ... (może nadpisać DEFAULTS keys)
     """
-    # apply runtime params
+    # apply runtime params (mutuje DEFAULTS as original; acceptable for quick runtime override)
     if params:
         for k, v in params.items():
             DEFAULTS[k] = v
@@ -412,6 +420,8 @@ def analyze_layout(tokens: List[Dict],
     if anchor_files_or_list:
         if isinstance(anchor_files_or_list, (list, tuple)):
             anchors.extend([str(x).lower() for x in anchor_files_or_list])
+        else:
+            anchors.append(str(anchor_files_or_list).lower())
     if use_yaml_anchors and anchor_yaml_dir and YAML_AVAILABLE:
         anchors_from_yaml = load_anchors_from_yaml_dir(anchor_yaml_dir)
         anchors.extend(anchors_from_yaml)
@@ -492,35 +502,32 @@ def analyze_layout(tokens: List[Dict],
                 ix = None
                 for ii in range(len(x_edges)-1):
                     if cx >= x_edges[ii] - 1e-9 and cx <= x_edges[ii+1] + 1e-9:
-                        ix = ii; break
+                        ix = ii
+                        break
                 # collect all cell_groups in this ix
                 selected = []
                 for b in page_blocks:
-                    # cell_group b bbox: check if its x-range overlaps column band
                     bx0, by0, bx1, by1 = b["bbox"]
-                    # compute mid x
                     midx = (bx0 + bx1)/2.0
                     if ix is None:
                         # fallback: overlap heuristic
                         if not (bx1 < ax0 or bx0 > ax1):
                             selected.append(b)
                     else:
-                        if midx >= x_edges[ix]-1e-9 and midx <= x_edges[ix+1]+1e-9:
+                        if midx >= x_edges[ix] - 1e-9 and midx <= x_edges[ix+1] + 1e-9:
                             selected.append(b)
                 # now choose those selected which are vertically close to anchor
                 sel_sorted = sorted(selected, key=lambda b: b["bbox"][1])
                 # include contiguous ones that are near anchor vertical span (or until a major gap)
                 merged_tokens = []
-                miny = min(a["bbox"][1],)
-                maxy = max(a["bbox"][3],)
-                count = 0
+                anchor_y0 = ay0
+                anchor_y1 = ay1
                 for s in sel_sorted:
                     sb = s["bbox"]
                     # treat as contiguous if vertical overlap / adjacency
                     # include if bbox overlaps anchor vertical span or sits below/above but within some limit
-                    if not (sb[3] < a["bbox"][1] - 0.05 or sb[1] > a["bbox"][3] + 0.05):
+                    if not (sb[3] < anchor_y0 - 0.05 or sb[1] > anchor_y1 + 0.05):
                         merged_tokens.extend(s.get("tokens", []))
-                        count += 1
                 if merged_tokens:
                     # create expanded anchor block
                     all_tokens = a.get("tokens", []) + merged_tokens
@@ -561,8 +568,25 @@ def analyze_layout(tokens: List[Dict],
             b2["tokens"] = toks_b
             final_blocks.append(b2)
 
+        # --- DODATKOWY DEBUG: zapisz pre-merge i post-merge bloki jeśli ustawione ---
+        _pre_merge_copy = [ { "block_id": b.get("block_id"), "page": b.get("page"), "type": b.get("type"), "bbox": b.get("bbox"), "tokens_count": len(b.get("tokens",[])) } for b in final_blocks ]
+
         # 4) merge close/small blocks to reduce over-segmentation
         merged = merge_close_blocks(final_blocks, merge_iou=DEFAULTS["merge_iou_threshold"])
+
+        if params and params.get("save_debug_json"):
+            try:
+                import json, pathlib
+                p = pathlib.Path(params.get("save_debug_dir", "." ))
+                p.mkdir(parents=True, exist_ok=True)
+                with open(p / f"layout_pre_merge_summary_page{page}.json", "w", encoding="utf-8") as f:
+                    json.dump(_pre_merge_copy, f, ensure_ascii=False, indent=2)
+                with open(p / f"layout_merged_blocks_page{page}.json", "w", encoding='utf-8') as f:
+                    json.dump(merged, f, ensure_ascii=False, indent=2, default=str)
+            except Exception:
+                # do not fail on debug save problems
+                if DEFAULTS.get("debug"):
+                    print("[layout_analyzer] failed to write debug json", repr(Exception))
 
         # assign correct page ids (if some helpers created page 0)
         for m in merged:
@@ -598,7 +622,7 @@ def block_to_text(block:Dict, order:str="top_down_left_right") -> str:
         toks = sorted(toks, key=lambda t: (_centroid(t)[1], _centroid(t)[0]))
     return " ".join((t.get("text","") or "").strip() for t in toks)
 
-# ---- CLI for quick test (unchanged) ----
+# ---- CLI for quick test (unchanged but uses debug save) ----
 if __name__ == "__main__":
     sample = [
         {"text":"Invoice","x0":0.05,"y0":0.05,"x1":0.2,"y1":0.07,"page":0},
@@ -613,6 +637,7 @@ if __name__ == "__main__":
     yaml_dir = os.path.join("Invoice Bot", "templates", "default")
     anchors = load_anchors_from_yaml_dir(yaml_dir) if YAML_AVAILABLE else []
     print("Loaded anchors:", anchors[:40])
-    blocks = analyze_layout(sample, anchor_files_or_list=None, anchor_yaml_dir=yaml_dir, use_yaml_anchors=True, lines=None)
+    params = {"debug": True, "save_debug_json": True, "save_debug_dir": "debug_layout"}
+    blocks = analyze_layout(sample, anchor_files_or_list=None, anchor_yaml_dir=yaml_dir, use_yaml_anchors=True, lines=None, params=params)
     from pprint import pprint
     pprint(blocks)
