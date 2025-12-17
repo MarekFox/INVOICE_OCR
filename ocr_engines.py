@@ -1,6 +1,7 @@
+# ocr_engines.py
 """
 FAKTURA BOT v5.0 - OCR Engines
-================================
+====
 Uniwersalne silniki OCR z obsługą Tesseract i PaddleOCR
 """
 
@@ -19,10 +20,10 @@ from language_config import get_language_config
 
 logger = logging.getLogger(__name__)
 
-# ===================== KONFIGURACJA TESSERACT =====================
+# ==== KONFIGURACJA TESSERACT ====
 # Ustaw ścieżkę do Tesseract
 pytesseract.pytesseract.tesseract_cmd = TESSERACT_CMD
-# ==================================================================
+# ====
 
 # Sprawdzenie dostępności PaddleOCR
 PADDLEOCR_AVAILABLE = False
@@ -42,7 +43,8 @@ class OCRResult:
     engine: str
     processing_time: float
     word_boxes: List[Dict]
-    
+    image_size: Tuple[int, int]  # (width, height) obrazu po preprocessingu
+
 class ImagePreprocessor:
     """Preprocessing obrazów przed OCR"""
     
@@ -170,47 +172,12 @@ class TesseractEngine:
         self.tesseract_lang = self.lang_config.tesseract_lang
         
     def extract_text(self, image: Image.Image) -> OCRResult:
-        """Ekstrakacja tekstu z obrazu"""
+        """Ekstrakcja tekstu z obrazu"""
         import time
         start_time = time.time()
         
-        logger.info("🔄 PaddleOCR: Konwersja obrazu do numpy...")
-        img_array = np.array(image)
-        logger.info(f"🔄 PaddleOCR: Rozmiar obrazu: {img_array.shape}")
-        
-        # try:
-        #     # ===================== WYWOŁANIE API 3.3.2 =====================
-        #     logger.info("🔄 PaddleOCR: Wywołanie predict()...")
-        #     result = self.ocr.predict(img_array)
-        #     logger.info(f"✅ PaddleOCR: predict() zakończony po {time.time()-start_time:.2f}s")
-        #     # ================================================================
-            
-        #     text_lines = []
-        #     word_boxes = []
-        #     confidences = []
-            
-        #     # ===================== PARSOWANIE WYNIKU 3.3.2 ==================
-        #     logger.info(f"🔄 PaddleOCR: Parsowanie wyniku (typ: {type(result)})...")
-            
-        #     if isinstance(result, list) and len(result) > 0:
-        #         page_result = result[0]
-                
-        #         if isinstance(page_result, dict):
-        #             texts = page_result.get('rec_texts', [])
-        #             scores = page_result.get('rec_scores', [])
-        #             polys = page_result.get('rec_polys', [])
-                    
-        #             logger.info(f"📊 PaddleOCR wykrył {len(texts)} elementów tekstowych")
-                    
-        #             # ... (reszta kodu parsowania bez zmian) ...
-                    
-        #             logger.info(f"✅ PaddleOCR: {len(text_lines)} linii posortowanych")
-        #         else:
-        #             logger.warning(f"⚠️ Nieoczekiwany typ page_result: {type(page_result)}")
-        #     else:
-        #         logger.warning(f"⚠️ Pusty wynik PaddleOCR (typ: {type(result)})")
-
         processed_image = ImagePreprocessor.preprocess(image)
+        processed_size = processed_image.size
         
         custom_config = f'--oem {CONFIG.ocr.tesseract_oem} --psm {CONFIG.ocr.tesseract_psm}'
         
@@ -231,15 +198,18 @@ class TesseractEngine:
         
         word_boxes = []
         for i in range(len(word_data['text'])):
-            if int(word_data['conf'][i]) > 0:
-                word_boxes.append({
-                    'text': word_data['text'][i],
-                    'left': word_data['left'][i],
-                    'top': word_data['top'][i],
-                    'width': word_data['width'][i],
-                    'height': word_data['height'][i],
-                    'confidence': word_data['conf'][i]
-                })
+            try:
+                if int(word_data['conf'][i]) > 0:
+                    word_boxes.append({
+                        'text': word_data['text'][i],
+                        'left': word_data['left'][i],
+                        'top': word_data['top'][i],
+                        'width': word_data['width'][i],
+                        'height': word_data['height'][i],
+                        'confidence': word_data['conf'][i]
+                    })
+            except Exception:
+                continue
                 
         processing_time = time.time() - start_time
         
@@ -249,7 +219,8 @@ class TesseractEngine:
             language=self.lang_config.code,
             engine='tesseract',
             processing_time=processing_time,
-            word_boxes=word_boxes
+            word_boxes=word_boxes,
+            image_size=processed_size
         )
     
     def extract_with_regions(self, image: Image.Image, regions: List[Tuple[int, int, int, int]]) -> List[OCRResult]:
@@ -292,56 +263,47 @@ class PaddleOCREngine:
             raise
         
     def extract_text(self, image: Image.Image) -> OCRResult:
-        """Ekstrakacja tekstu - PaddleOCR 3.3.2 FINALNA"""
+        """Ekstrakcja tekstu - PaddleOCR 3.3.2 FINALNA"""
         import time
         start_time = time.time()
         
-        img_array = np.array(image)
+        # preprocess and use processed image for prediction
+        processed_image = ImagePreprocessor.preprocess(image)
+        processed_size = processed_image.size
+        # Upewnij się, że obraz jest w trybie RGB (3 kanały)
+        if processed_image.mode != "RGB":
+            processed_image = processed_image.convert("RGB")
+        img_array = np.array(processed_image)
         
         try:
-            # ===================== WYWOŁANIE API 3.3.2 =====================
+            # ==== WYWOŁANIE API 3.3.2 ====
             result = self.ocr.predict(img_array)
-            # ================================================================
+            # ====
             
             text_lines = []
             word_boxes = []
             confidences = []
             
-            # ===================== PARSOWANIE WYNIKU 3.3.2 ==================
-            # Format: Lista słowników (jeden słownik na stronę/obraz)
-            # [
-            #     {
-            #         'rec_texts': ['text1', 'text2', ...],
-            #         'rec_scores': [0.95, 0.92, ...],
-            #         'rec_polys': [array([[x,y], ...]), ...],
-            #         ...
-            #     }
-            # ]
-            
+            # ==== PARSOWANIE WYNIKU 3.3.2 ====
             if isinstance(result, list) and len(result) > 0:
-                # Bierzemy pierwszy element (pierwszy obraz)
                 page_result = result[0]
                 
                 if isinstance(page_result, dict):
-                    # Pobierz dane z pierwszego wyniku
                     texts = page_result.get('rec_texts', [])
                     scores = page_result.get('rec_scores', [])
                     polys = page_result.get('rec_polys', [])
                     
                     logger.info(f"📊 PaddleOCR wykrył {len(texts)} elementów tekstowych")
                     
-                    # Zbierz dane dla każdej linii
                     items = []
                     for idx in range(len(texts)):
                         text = texts[idx] if idx < len(texts) else ''
                         score = scores[idx] if idx < len(scores) else 0.0
                         poly = polys[idx] if idx < len(polys) else None
                         
-                        if text.strip():  # Ignoruj puste
-                            # Oblicz pozycję
+                        if text.strip():
                             if poly is not None and len(poly) > 0:
                                 try:
-                                    # poly to numpy array [[x1,y1], [x2,y2], [x3,y3], [x4,y4]]
                                     y_coords = [point[1] for point in poly]
                                     x_coords = [point[0] for point in poly]
                                     y_center = sum(y_coords) / len(y_coords)
@@ -359,7 +321,6 @@ class PaddleOCREngine:
                                     })
                                 except Exception as e:
                                     logger.warning(f"⚠️ Błąd parsowania poly dla '{text}': {e}")
-                                    # Dodaj z domyślnymi koordynatami
                                     items.append({
                                         'text': text,
                                         'score': score,
@@ -371,7 +332,6 @@ class PaddleOCREngine:
                                         'height': 20
                                     })
                             else:
-                                # Brak koordynatów
                                 items.append({
                                     'text': text,
                                     'score': score,
@@ -384,7 +344,6 @@ class PaddleOCREngine:
                                 })
                     
                     # SORTOWANIE: góra->dół, lewo->prawo
-                    # Grupuj linie w "wiersze" z tolerancją ±20px
                     items.sort(key=lambda item: (int(item['y'] / 20), item['x']))
                     
                     # Wyciągnij posortowane dane
@@ -406,7 +365,7 @@ class PaddleOCREngine:
                     logger.warning(f"⚠️ Nieoczekiwany typ page_result: {type(page_result)}")
             else:
                 logger.warning(f"⚠️ Pusty lub nieprawidłowy wynik PaddleOCR")
-            # ================================================================
+            # ====
             
             full_text = '\n'.join(text_lines)
             avg_confidence = sum(confidences) / len(confidences) if confidences else 0.0
@@ -420,7 +379,8 @@ class PaddleOCREngine:
                 language=self.lang_config.code,
                 engine='paddleocr_3.3.2',
                 processing_time=processing_time,
-                word_boxes=word_boxes
+                word_boxes=word_boxes,
+                image_size=processed_size
             )
             
         except Exception as e:
@@ -435,7 +395,8 @@ class PaddleOCREngine:
                 language=self.lang_config.code,
                 engine='paddleocr_error',
                 processing_time=time.time() - start_time,
-                word_boxes=[]
+                word_boxes=[],
+                image_size=processed_size if 'processed_size' in locals() else image.size
             )
     
     def detect_tables(self, image: Image.Image) -> List[Dict]:
@@ -458,7 +419,7 @@ class HybridOCREngine:
                 
     def extract_text(self, image: Image.Image, strategy: str = 'best') -> OCRResult:
         """
-        Ekstrakacja z różnymi strategiami:
+        Ekstrakcja z różnymi strategiami:
         - 'fast': tylko Tesseract
         - 'accurate': tylko PaddleOCR
         - 'best': porównaj oba i wybierz lepszy
@@ -493,13 +454,16 @@ class HybridOCREngine:
             
             all_boxes = tesseract_result.word_boxes + paddle_result.word_boxes
             
+            image_size = getattr(tesseract_result, "image_size", None) or getattr(paddle_result, "image_size", (0, 0))
+            
             return OCRResult(
                 text=merged_text,
                 confidence=avg_confidence,
                 language=self.language,
                 engine='hybrid',
                 processing_time=tesseract_result.processing_time + paddle_result.processing_time,
-                word_boxes=all_boxes
+                word_boxes=all_boxes,
+                image_size=image_size
             )
             
         return self.tesseract.extract_text(image)
@@ -531,4 +495,3 @@ class HybridOCREngine:
                     merged_lines.append(line2)
                     
         return '\n'.join(merged_lines)
-
