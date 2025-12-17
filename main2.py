@@ -1,4 +1,4 @@
-# batch_test4.py
+# main2.py (zaktualizowana wersja)
 import os
 import sys
 import json
@@ -16,7 +16,7 @@ from ocr_engines import ImagePreprocessor, TesseractEngine, PaddleOCREngine, Hyb
 from layout_analyzer import analyze_layout, load_anchors_from_yaml_dir
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-logger = logging.getLogger("batch_test4")
+logger = logging.getLogger("main2")
 
 SUPPORTED_FORMATS = [".pdf", ".png", ".jpg", ".jpeg", ".tiff"]
 
@@ -33,8 +33,6 @@ def ocr_and_tokens_for_image(engine_name: str, image: Image.Image, page_index: i
     word_boxes = getattr(ocr_result, "word_boxes", []) or []
     logger.debug(f"OCR returned raw word_boxes count: {len(word_boxes)}")
 
-    # Use image size returned by OCRResult (processed image size) if available,
-    # otherwise fall back to original PIL image size
     processed_size = getattr(ocr_result, "image_size", None)
     if processed_size:
         w, h = processed_size
@@ -85,12 +83,9 @@ def load_blocks_from_json(json_path: Path) -> List[Dict]:
             data = json.load(f)
         if isinstance(data, list):
             return data
-        # jeśli plik ma strukturę dict z kluczami per-page, próbujemy ekstraktować listę
         if isinstance(data, dict):
-            # common case: dict with "blocks" or page keys
             if "blocks" in data and isinstance(data["blocks"], list):
                 return data["blocks"]
-            # flatten page keys
             blocks = []
             for v in data.values():
                 if isinstance(v, list):
@@ -102,13 +97,8 @@ def load_blocks_from_json(json_path: Path) -> List[Dict]:
     except Exception:
         logger.exception(f"Błąd wczytywania JSON {json_path}")
         return []
-    
+
 def estimate_bbox_offset(blocks: List[Dict], image_size: Tuple[int, int]) -> Tuple[int, int]:
-    """
-    Prosta heurystyka do oszacowania przesunięcia bbox względem obrazu.
-    Porównuje minimalne x0,y0 bbox bloków z 0 i zwraca przesunięcie w px.
-    Zakładamy, że bbox są znormalizowane (0..1) lub absolutne.
-    """
     w, h = image_size
     try:
         min_x0 = min((b["bbox"][0] for b in blocks if b.get("bbox")), default=0)
@@ -122,14 +112,11 @@ def estimate_bbox_offset(blocks: List[Dict], image_size: Tuple[int, int]) -> Tup
 
     logger.debug(f"estimate_bbox_offset -> min_x0={min_x0}, min_y0={min_y0}, offset_x={offset_x}, offset_y={offset_y}")
     return offset_x, offset_y
-    
+
 def draw_blocks_on_image(pil_image: Image.Image, blocks: List[Dict], out_path: Path,
                     draw_tokens: bool = False, alpha: float = 0.6):
-    """
-    Rysuje prostokąty na obrazie z automatyczną korektą przesunięcia bbox.
-    """
     try:
-        img = np.array(pil_image.convert("RGB"))[:, :, ::-1].copy()  # BGR for cv2
+        img = np.array(pil_image.convert("RGB"))[:, :, ::-1].copy()
     except Exception:
         logger.exception("draw_blocks_on_image: błąd konwersji obrazu PIL->np")
         return
@@ -187,7 +174,6 @@ def draw_blocks_on_image(pil_image: Image.Image, blocks: List[Dict], out_path: P
                     ty0 = t.get("y0", 0)
                     tx1 = t.get("x1", 0)
                     ty1 = t.get("y1", 0)
-                    # determine if coords are normalized (0..1) or absolute
                     if tx1 > 2.0 or ty1 > 2.0:
                         tpt1 = (int(tx0) + offset_x, int(ty0) + offset_y)
                         tpt2 = (int(tx1) + offset_x, int(ty1) + offset_y)
@@ -237,35 +223,7 @@ def draw_tokens_on_image(pil_image: Image.Image, tokens: List[Dict], out_path: P
     except Exception:
         logger.exception(f"draw_tokens_on_image: nie udało się zapisać obrazu do {out_path}")
 
-def draw_pre_and_merged_layers(pil_image: Image.Image, pre_blocks: List[Dict], merged_blocks: List[Dict], out_path: Path, draw_tokens: bool = False):
-    """
-    Rysuje pre-merge cienko (kolor A) oraz merged grubo (kolor B) na jednym obrazie.
-    Zapisuje wynik do out_path.
-    """
-    try:
-        img = np.array(pil_image.convert("RGB"))[:, :, ::-1].copy()
-    except Exception:
-        logger.exception("draw_pre_and_merged_layers: błąd konwersji obrazu")
-        return
-    tmp1 = img.copy()
-    # pre: cieńsze, kolor gray/blue
-    if pre_blocks:
-        draw_blocks_on_image(pil_image, pre_blocks, out_path.with_name(out_path.stem + "_pre_tmp.png"), draw_tokens=draw_tokens, alpha=0.35)
-        # wczytaj tymczasowy i skopiuj
-        tmp1 = cv2.imread(str(out_path.with_name(out_path.stem + "_pre_tmp.png")))
-    # teraz narysuj merged na tmp1
-    pil_tmp = Image.fromarray(tmp1[:, :, ::-1])
-    draw_blocks_on_image(pil_tmp, merged_blocks, out_path, draw_tokens=draw_tokens, alpha=0.6)
-    # sprzątanie pliku tymczasowego
-    try:
-        tmp_path = out_path.with_name(out_path.stem + "_pre_tmp.png")
-        if tmp_path.exists():
-            tmp_path.unlink()
-    except Exception:
-        logger.debug("Nie udało się usunąć pliku tymczasowego pre_tmp.png")
-
 def merge_close_blocks_local(blocks: List[Dict], max_gap: float = 0.02) -> List[Dict]:
-    # prosty merge blisko po typie i stronie (zachowuje strukturę JSON layout_analyzer)
     merged = []
     blocks = sorted(blocks, key=lambda b: (b.get("page", 0), b.get("bbox", (0,0,0,0))[1], b.get("bbox", (0,0,0,0))[0]))
 
@@ -330,36 +288,35 @@ def process_file(file_path: Path, output_dir: Path, engine: str, yaml_dir: Optio
         logger.exception("Błąd konwersji PDF")
         return
 
+    # Accumulate blocks for the whole document
+    all_blocks: List[Dict] = []
+    page_images: List[Image.Image] = []
+    page_sizes: List[Tuple[int,int]] = []
+
     for page_index, pil_img in enumerate(pages):
+        page_images.append(pil_img)
+        page_sizes.append(pil_img.size[::-1])  # (width, height) -> note: PIL size = (w,h), we want (w,h)
         logger.debug(f"process_file: przetwarzam stronę {page_index} (indeks) pliku {file_path.name}")
-        # Najpierw spróbuj wczytać istniejące pliki JSON, jeśli flaga enabled
-        json_pre = None
-        json_merged = None
-        # przewidywane nazwy plików wygenerowanych przez layout_analyzer
-        name_pre = f"layout_pre_merge_summary_page{page_index}.json"
-        name_merged = f"layout_merged_blocks_page{page_index}.json"
-        # w JSONach nazwy mogą być page0 lub page1 — sprawdzimy obie możliwości
-        candidates = []
-        if json_dir:
-            candidates.append(Path(json_dir))
-        candidates.append(output_dir)
-        candidates.append(Path("."))
 
-        logger.debug(f"process_file: kandydaci na katalog JSON: {candidates}")
-
+        # If use_existing_json, try to find JSON for this page or stem-prefixed file
         found_pre = None
         found_merged = None
         if use_existing_json:
+            name_pre = f"layout_pre_merge_summary_page{page_index}.json"
+            name_merged = f"layout_merged_blocks_page{page_index}.json"
+            candidates = []
+            if json_dir:
+                candidates.append(Path(json_dir))
+            candidates.append(output_dir)
+            candidates.append(Path("."))
             for base in candidates:
                 if not base:
                     continue
                 p_pre = base / name_pre
                 p_merged = base / name_merged
-                # also try +1 variant
                 p_pre_1 = base / f"layout_pre_merge_summary_page{page_index+1}.json"
                 p_merged_1 = base / f"layout_merged_blocks_page{page_index+1}.json"
-                # also try file stem prefixed variant: {stem}_page{n}_layout_blocks.json
-                stem_pref = output_dir / f"{file_path.stem}_page{page_index+1}_layout_blocks.json"
+                stem_pref = base / f"{file_path.stem}_page{page_index+1}_layout_blocks.json"
                 if p_pre.exists():
                     found_pre = p_pre
                 elif p_pre_1.exists():
@@ -369,94 +326,126 @@ def process_file(file_path: Path, output_dir: Path, engine: str, yaml_dir: Optio
                 elif p_merged_1.exists():
                     found_merged = p_merged_1
                 if stem_pref.exists() and not found_merged:
-                    # stem_pref likely is merged blocks full file (one file per page)
                     found_merged = stem_pref
-                # if found both - break
                 if found_pre and found_merged:
                     break
             logger.debug(f"process_file: found_pre={found_pre}, found_merged={found_merged}")
 
-        # jeśli mamy existing merged JSON -> rysujemy je; w przeciwnym wypadku generujemy nowe
-        if (use_existing_json and found_merged) or (not use_existing_json):
-            # if not forcing existing json, still we run OCR+analysis to produce blocks for saving
-            tokens = ocr_and_tokens_for_image(engine, pil_img, page_index)
-            logger.debug(f"process_file: otrzymano {len(tokens)} tokenów dla strony {page_index}")
-            if not tokens:
-                logger.warning(f"Brak tokenów OCR na stronie {page_index+1} pliku {file_path.name}")
-                continue
+        # get tokens for this page (used for analyze_layout or optional token draw)
+        tokens = ocr_and_tokens_for_image(engine, pil_img, page_index)
+        if not tokens:
+            logger.warning(f"Brak tokenów OCR na stronie {page_index+1} pliku {file_path.name}")
+            continue
 
-            # jeśli wymuszono użycie istniejącego JSON i znaleziono go -> wczytaj i rysuj bez ponownej analizy
-            if use_existing_json and found_merged:
+        if use_existing_json and found_merged:
+            try:
                 merged_blocks = load_blocks_from_json(found_merged)
-                pre_blocks = load_blocks_from_json(found_pre) if found_pre else []
-                # optionally merge nearby blocks to reduce over-segmentation (lokalny merge)
                 merged_blocks = merge_close_blocks_local(merged_blocks, max_gap=0.02)
-                out_png = output_dir / f"{file_path.stem}_page{page_index+1}_layout_blocks_fromjson.png"
-                if pre_blocks:
-                    draw_pre_and_merged_layers(pil_img, pre_blocks, merged_blocks, out_png, draw_tokens=draw_tokens)
-                else:
-                    draw_blocks_on_image(pil_img, merged_blocks, out_png, draw_tokens=draw_tokens)
-                # optionally draw tokens separately if requested
-                if draw_tokens:
-                    try:
-                        draw_tokens_on_image(pil_img, tokens, output_dir / f"{file_path.stem}_page{page_index+1}_tokens_fromjson.png")
-                    except Exception:
-                        logger.exception("Nie udało się narysować tokenów (z istniejącego JSON)")
-                continue
-
-            # otherwise (normal flow) run layout analyzer
+                # ensure page attribute on blocks (if missing) - keep whatever page stored in JSON
+                for b in merged_blocks:
+                    if "page" not in b:
+                        b["page"] = page_index
+                all_blocks.extend(merged_blocks)
+                logger.debug(f"Loaded {len(merged_blocks)} blocks from existing JSON for page {page_index}")
+            except Exception:
+                logger.exception("Błąd wczytywania istniejącego JSON dla strony")
+        else:
+            # run layout analyzer for this page
             try:
                 logger.debug("Uruchamiam analyze_layout")
                 blocks = analyze_layout(tokens, anchor_files_or_list=anchors, anchor_yaml_dir=yaml_dir, use_yaml_anchors=bool(yaml_dir), use_table_detection=True, params=params)
-                logger.debug(f"analyze_layout zwrócił {len(blocks)} bloków (przed merge)")
+                logger.debug(f"analyze_layout zwrócił {len(blocks)} bloków (przed merge) dla strony {page_index}")
             except Exception:
                 logger.exception("Błąd analyze_layout")
                 blocks = []
 
-            # Scal bloki blisko siebie
             try:
                 blocks = merge_close_blocks_local(blocks, max_gap=0.02)
                 logger.debug(f"Po merge_close_blocks_local: {len(blocks)} bloków")
             except Exception:
                 logger.exception("Błąd merge_close_blocks_local")
 
-            # Zapisz JSON wynikowy (merged)
-            try:
-                json_out = output_dir / f"{file_path.stem}_page{page_index+1}_layout_blocks.json"
-                with open(json_out, "w", encoding="utf-8") as f:
-                    json.dump(blocks, f, indent=2, ensure_ascii=False)
-                logger.info(f"Zapisano JSON z blokami: {json_out}")
-            except Exception:
-                logger.exception("Nie udało się zapisać wynikowego JSON z blokami")
+            # ensure page attribute set
+            for b in blocks:
+                if "page" not in b:
+                    b["page"] = page_index
+            all_blocks.extend(blocks)
 
-            # Spróbuj też zapisać w formacie kompatybilnym z layout_analyzer naming (merge file)
-            out_merged_name = output_dir / f"layout_merged_blocks_page{page_index}.json"
-            try:
-                with open(out_merged_name, "w", encoding="utf-8") as f:
-                    json.dump(blocks, f, indent=2, ensure_ascii=False, default=str)
-            except Exception:
-                logger.exception(f"Nie udało się zapisać pliku {out_merged_name}")
+    # --- After processing all pages: save a single JSON and a single PNG ---
+    try:
+        json_out = output_dir / f"{file_path.stem}.json"
+        with open(json_out, "w", encoding="utf-8") as f:
+            json.dump(all_blocks, f, indent=2, ensure_ascii=False)
+        logger.info(f"Zapisano scalony JSON (cały dokument): {json_out}")
+    except Exception:
+        logger.exception("Nie udało się zapisać scalonego JSON")
 
-            # Narysuj bloky (z nowo wygenerowanego)
-            try:
-                img_out = output_dir / f"{file_path.stem}_page{page_index+1}_layout_blocks.png"
-                draw_blocks_on_image(pil_img, blocks, img_out, draw_tokens=draw_tokens)
-            except Exception:
-                logger.exception("Nie udało się narysować bloków")
-
-            # optionally draw tokens to separate PNG to help debug
-            if draw_tokens:
-                try:
-                    draw_tokens_on_image(pil_img, tokens, output_dir / f"{file_path.stem}_page{page_index+1}_tokens.png")
-                except Exception:
-                    logger.exception("Nie udało się narysować tokenów (normal flow)")
-
-        else:
-            # przypadek gdy wybrano use_existing_json ale nie znaleziono plików -> log i pomiń
-            logger.warning(f"Wybrano --use_existing_json, ale nie znaleziono plików JSON dla strony {page_index} (szukałem {name_merged} w {candidates}). Wykonuję normalną analizę.")
-            # fallback: normalny przebieg powyżej (rekursywnie wywołaj funkcję bez use_existing flag)
-            process_file(file_path, output_dir, engine, yaml_dir, anchors, params, use_existing_json=False, json_dir=json_dir, draw_tokens=draw_tokens)
+    # Compose combined image (stack pages vertically) if multiple pages
+    try:
+        if len(page_images) == 0:
+            logger.warning("Brak obrazów stron do zapisania PNG")
             return
+
+        if len(page_images) == 1:
+            combined_img = page_images[0]
+            page_offsets = [0]
+            page_wh = [(combined_img.width, combined_img.height)]
+        else:
+            widths = [img.width for img in page_images]
+            heights = [img.height for img in page_images]
+            max_w = max(widths)
+            total_h = sum(heights)
+            combined = Image.new("RGB", (max_w, total_h), (255,255,255))
+            y = 0
+            page_offsets = []
+            page_wh = []
+            for img in page_images:
+                combined.paste(img, (0, y))
+                page_offsets.append(y)
+                page_wh.append((img.width, img.height))
+                y += img.height
+            combined_img = combined
+        # adjust bboxes to absolute coordinates on the combined image
+        adjusted_blocks = []
+        for b in all_blocks:
+            bbox = b.get("bbox")
+            page = int(b.get("page", 0))
+            if not bbox:
+                continue
+            # page image size:
+            try:
+                pw, ph = page_wh[page]
+            except Exception:
+                pw, ph = page_images[0].width, page_images[0].height
+            y_offset = page_offsets[page] if page < len(page_offsets) else 0
+
+            try:
+                x0, y0, x1, y1 = bbox
+                # detect normalized coords (<=2) vs absolute
+                if x1 <= 2.0 and y1 <= 2.0:
+                    ax0 = int(x0 * pw)
+                    ay0 = int(y0 * ph) + y_offset
+                    ax1 = int(x1 * pw)
+                    ay1 = int(y1 * ph) + y_offset
+                else:
+                    ax0 = int(x0)
+                    ay0 = int(y0) + y_offset
+                    ax1 = int(x1)
+                    ay1 = int(y1) + y_offset
+                new_bbox = (ax0, ay0, ax1, ay1)
+                nb = dict(b)
+                nb["bbox"] = new_bbox
+                adjusted_blocks.append(nb)
+            except Exception:
+                logger.debug("Nie udało się przekształcić bbox do koordynatów absolutnych, pomijam")
+                continue
+
+        # final png path (single file with original stem)
+        out_png = output_dir / f"{file_path.stem}.png"
+        # use draw_blocks_on_image on the combined image (it will accept absolute bbox)
+        draw_blocks_on_image(combined_img, adjusted_blocks, out_png, draw_tokens=draw_tokens)
+    except Exception:
+        logger.exception("Nie udało się przygotować i zapisać zbiorczego obrazu PNG")
 
 def main():
     parser = argparse.ArgumentParser(description="Batch test OCR + layout analyzer z wizualizacją bloków")
