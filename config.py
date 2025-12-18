@@ -6,6 +6,7 @@ Centralna konfiguracja aplikacji
 
 import os
 import sys
+import io
 from pathlib import Path
 from typing import Dict, Any, Optional
 from dataclasses import dataclass
@@ -15,6 +16,8 @@ import json
 APP_VERSION = "5.0.0"
 APP_NAME = "FAKTURA BOT ULTIMATE"
 APP_DESCRIPTION = "Profesjonalny system do masowego przetwarzania faktur"
+
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
 # Tryb debugowania
 DEBUG_MODE = True
